@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: identity-config
+  namespace: fcg
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  ASPNETCORE_HTTP_PORTS: "8080"
+  RabbitMq__Host: "rabbitmq"
+  RabbitMq__Port: "5672"
+  Jwt__Issuer: "fcg-identity"
+  Jwt__Audience: "fcg"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  Loki__Url: "http://loki:3100"
