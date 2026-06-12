@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: fcg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      containers:
+        - name: tempo
+          image: grafana/tempo:latest
+          args: ["-config.file=/etc/tempo/tempo.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: http
+              containerPort: 3200
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo/tempo.yaml
+              subPath: tempo.yaml
+            - name: data
+              mountPath: /var/tempo
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: data
+          emptyDir: {}

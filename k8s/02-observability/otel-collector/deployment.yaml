@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: fcg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:latest
+          args: ["--config=/etc/otelcol-contrib/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: prom-exporter
+              containerPort: 8889
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol-contrib/config.yaml
+              subPath: config.yaml
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config

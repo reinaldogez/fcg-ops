@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: fcg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      containers:
+        - name: loki
+          image: grafana/loki:latest
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports:
+            - name: http
+              containerPort: 3100
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki/loki.yaml
+              subPath: loki.yaml
+            - name: data
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: data
+          emptyDir: {}

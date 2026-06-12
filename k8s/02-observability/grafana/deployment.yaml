@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: fcg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:latest
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+          ports:
+            - name: http
+              containerPort: 3000
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+            - name: data
+              mountPath: /var/lib/grafana
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: data
+          emptyDir: {}
