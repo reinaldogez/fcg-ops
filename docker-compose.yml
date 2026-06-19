@@ -16,6 +16,17 @@ services:
     volumes:
       - "sqlserver-identity-data:/var/opt/mssql"
 
+  # Store de idempotencia descartavel (TTL curto): sem volume nomeado, fs efemero do
+  # container. Endereco por nome de servico (redis:6379) na rede interna; sem porta no host.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ---------- broker de mensageria ----------
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -120,6 +131,29 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       Loki__Url: http://loki:3100
 
+  # ---------- orquestracao do notifications ----------
+  # Worker de notificacoes: consumer-only (MassTransit em background); o HTTP expoe so
+  # /health/live e /health/ready (Redis) — sem REST de negocio.
+  notifications-api:
+    build:
+      context: ../fcg-notifications
+      secrets: [gh_token]
+    image: ghcr.io/reinaldogez/fcg-notifications:latest
+    ports:
+      - "8082:8080"   # diagnostico de health no host (8081 e do identity); nao e REST de negocio
+    depends_on:
+      redis:    { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_HTTP_PORTS: "8080"
+      Redis__Connection: ${REDIS_CONNECTION}
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Username: ${RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      Loki__Url: http://loki:3100
+
   # ---------- infraestrutura de dados das proximas levas (placeholders, ainda inativos) ----------
   # Descomentar quando catalog/payments/notifications entrarem.
   # postgres-catalog:
@@ -147,17 +181,6 @@ services:
   #     retries: 10
   #   volumes:
   #     - "postgres-payments-data:/var/lib/postgresql/data"
-  #
-  # redis:
-  #   image: redis:7-alpine
-  #   command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
-  #   healthcheck:
-  #     test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 10
-  #   volumes:
-  #     - "redis-data:/data"
 
 volumes:
   sqlserver-identity-data:
