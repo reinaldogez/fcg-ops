@@ -2,20 +2,22 @@
 set -euo pipefail
 
 # Aplica os manifestos do cluster em ordem de boot, esperando cada fase ficar pronta
-# antes da próxima (namespace -> infra -> observabilidade -> serviços).
+# antes da próxima: namespace -> infra -> observabilidade -> serviços.
 # Pré-requisito: cluster já criado (bootstrap-k3d.sh) e os Secrets reais preenchidos.
 # Este script NÃO gera segredos nem chaves — só aplica o que está em disco.
 
-NS="fcg"
-K8S="k8s"
-TIMEOUT="600s"   # generoso: o SQL Server demora a aceitar conexões.
+readonly NS="fcg"
+readonly K8S="k8s"
+readonly TIMEOUT="600s"   # generoso: o SQL Server demora a aceitar conexões.
 
 # Secrets reais (não versionados). Sem eles a aplicação não sobe.
-REQUIRED_SECRETS=(
+readonly REQUIRED_SECRETS=(
   "$K8S/01-infra/sqlserver-identity/secret.yaml"
   "$K8S/01-infra/rabbitmq/secret.yaml"
+  "$K8S/01-infra/redis/secret.yaml"
   "$K8S/03-services/identity/secret.yaml"
   "$K8S/03-services/identity/secret-jwt.yaml"
+  "$K8S/03-services/notifications/secret.yaml"
 )
 
 # --- helpers -----------------------------------------------------------------
@@ -35,7 +37,7 @@ check_required_secrets() {
 
 como resolver:
   1) preencha os valores reais no .env (cp .env.example .env, depois edite);
-  2) materialize os Secrets com 'bash scripts/init-secrets.sh' (gera a chave RSA e os 4 secret.yaml).
+  2) materialize os Secrets com 'bash scripts/init-secrets.sh'.
   alternativa manual: copie cada secret.example.yaml para secret.yaml e preencha à mão.
 EOF
   exit 1
@@ -48,10 +50,17 @@ apply_dir() {
     | xargs -0 -I{} kubectl apply -f {}
 }
 
+# Aplica uma lista de manifestos, na ordem dada.
+apply_files() {
+  local f
+  for f in "$@"; do
+    kubectl apply -f "$f"
+  done
+}
+
 # Espera um pod (por label app=) ficar Ready.
 wait_ready() {
-  local app="$1"
-  kubectl wait --for=condition=ready pod -l "app=$app" -n "$NS" --timeout="$TIMEOUT"
+  kubectl wait --for=condition=ready pod -l "app=$1" -n "$NS" --timeout="$TIMEOUT"
 }
 
 # --- fases de boot -----------------------------------------------------------
@@ -65,8 +74,9 @@ phase_infra() {
   echo "==> 01-infra"
   apply_dir "$K8S/01-infra"
   echo "    aguardando infra ficar Ready..."
-  wait_ready "sqlserver-identity"
-  wait_ready "rabbitmq"
+  wait_ready sqlserver-identity
+  wait_ready rabbitmq
+  wait_ready redis
 }
 
 phase_observability() {
@@ -77,18 +87,33 @@ phase_observability() {
 # A migration (Job) precisa concluir antes do Deployment subir.
 phase_identity() {
   echo "==> 03-services/identity (Job de migration antes do Deployment)"
-  local id="$K8S/03-services/identity"
+  local dir="$K8S/03-services/identity"
 
-  kubectl apply -f "$id/configmap.yaml"
-  kubectl apply -f "$id/secret.yaml"
-  kubectl apply -f "$id/secret-jwt.yaml"
+  apply_files \
+    "$dir/configmap.yaml" \
+    "$dir/secret.yaml" \
+    "$dir/secret-jwt.yaml" \
+    "$dir/migrate-job.yaml"
 
-  kubectl apply -f "$id/migrate-job.yaml"
   echo "    aguardando migration concluir..."
   kubectl wait --for=condition=complete job/identity-migrate -n "$NS" --timeout="$TIMEOUT"
 
-  kubectl apply -f "$id/deployment.yaml"
-  kubectl apply -f "$id/service.yaml"
+  apply_files \
+    "$dir/deployment.yaml" \
+    "$dir/service.yaml"
+}
+
+# Consumer-only: sem banco e sem migration. Os initContainers do Deployment já
+# esperam redis e rabbitmq, então basta aplicar os quatro manifestos.
+phase_notifications() {
+  echo "==> 03-services/notifications"
+  local dir="$K8S/03-services/notifications"
+
+  apply_files \
+    "$dir/configmap.yaml" \
+    "$dir/secret.yaml" \
+    "$dir/deployment.yaml" \
+    "$dir/service.yaml"
 }
 
 # --- main --------------------------------------------------------------------
@@ -99,6 +124,7 @@ main() {
   phase_infra
   phase_observability
   phase_identity
+  phase_notifications
 
   echo ""
   echo "ok: manifestos aplicados. Acompanhe com: kubectl get pods -n $NS -w"
