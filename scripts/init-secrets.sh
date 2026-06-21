@@ -31,6 +31,8 @@ RABBIT_USER="$(get_env RABBITMQ_USER)"
 RABBIT_PASSWORD="$(get_env RABBITMQ_PASSWORD)"
 DB_CONNECTION="$(get_env IDENTITY_DB_CONNECTION)"
 ADMIN_PASSWORD="$(get_env ADMINSEED_PASSWORD)"
+REDIS_PASSWORD="$(get_env REDIS_PASSWORD)"
+REDIS_CONNECTION="$(get_env REDIS_CONNECTION)"
 
 # Pré-condição: nenhuma var obrigatória pode estar vazia.
 missing=0
@@ -39,7 +41,9 @@ for pair in \
   "RABBITMQ_USER=$RABBIT_USER" \
   "RABBITMQ_PASSWORD=$RABBIT_PASSWORD" \
   "IDENTITY_DB_CONNECTION=$DB_CONNECTION" \
-  "ADMINSEED_PASSWORD=$ADMIN_PASSWORD"; do
+  "ADMINSEED_PASSWORD=$ADMIN_PASSWORD" \
+  "REDIS_PASSWORD=$REDIS_PASSWORD" \
+  "REDIS_CONNECTION=$REDIS_CONNECTION"; do
   if [[ -z "${pair#*=}" ]]; then
     echo "erro: variável obrigatória vazia ou ausente no $ENV_FILE: ${pair%%=*}" >&2
     missing=1
@@ -48,8 +52,15 @@ done
 [[ "$missing" -eq 0 ]] || exit 1
 
 # Aviso (não bloqueante) se valores ainda forem os placeholders do .example.
-case "$SA_PASSWORD$RABBIT_PASSWORD$ADMIN_PASSWORD" in
+case "$SA_PASSWORD$RABBIT_PASSWORD$ADMIN_PASSWORD$REDIS_PASSWORD" in
   *ChangeMe*) echo "aviso: ainda há valores 'ChangeMe...' no $ENV_FILE — confira se são propositais." >&2 ;;
+esac
+
+# A senha pura usada pelo servidor (--requirepass) tem de bater com a embutida na
+# connection string do consumidor; senão o consumidor não autentica no Redis.
+case "$REDIS_CONNECTION" in
+  *"password=$REDIS_PASSWORD"*) ;;
+  *) echo "aviso: REDIS_CONNECTION não embute a mesma senha de REDIS_PASSWORD no $ENV_FILE — devem casar." >&2 ;;
 esac
 
 # Chave RSA: gera só se ainda não existir; caso contrário reaproveita.
@@ -63,8 +74,10 @@ sq() { printf "%s" "$1" | sed "s/'/''/g"; }
 
 SQL_SECRET="k8s/01-infra/sqlserver-identity/secret.yaml"
 RABBIT_SECRET="k8s/01-infra/rabbitmq/secret.yaml"
+REDIS_SECRET="k8s/01-infra/redis/secret.yaml"
 IDENTITY_SECRET="k8s/03-services/identity/secret.yaml"
 JWT_SECRET="k8s/03-services/identity/secret-jwt.yaml"
+NOTIFICATIONS_SECRET="k8s/03-services/notifications/secret.yaml"
 
 cat > "$SQL_SECRET" <<EOF
 apiVersion: v1
@@ -87,6 +100,17 @@ type: Opaque
 stringData:
   RABBITMQ_DEFAULT_USER: '$(sq "$RABBIT_USER")'
   RABBITMQ_DEFAULT_PASS: '$(sq "$RABBIT_PASSWORD")'
+EOF
+
+cat > "$REDIS_SECRET" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: fcg
+type: Opaque
+stringData:
+  REDIS_PASSWORD: '$(sq "$REDIS_PASSWORD")'
 EOF
 
 cat > "$IDENTITY_SECRET" <<EOF
@@ -119,9 +143,24 @@ EOF
   echo "  Jwt__KeyId: '$(sq "$KEY_ID")'"
 } > "$JWT_SECRET"
 
+cat > "$NOTIFICATIONS_SECRET" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: notifications-secret
+  namespace: fcg
+type: Opaque
+stringData:
+  Redis__Connection: '$(sq "$REDIS_CONNECTION")'
+  RabbitMq__Username: '$(sq "$RABBIT_USER")'
+  RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
+EOF
+
 echo "ok: Secrets reais materializados a partir de '$ENV_FILE' (fora do git):"
 echo "  $SQL_SECRET"
 echo "  $RABBIT_SECRET"
+echo "  $REDIS_SECRET"
 echo "  $IDENTITY_SECRET"
 echo "  $JWT_SECRET"
+echo "  $NOTIFICATIONS_SECRET"
 echo "próximo passo: bash scripts/apply-all.sh"
