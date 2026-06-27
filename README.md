@@ -8,10 +8,12 @@ aplicação — só composição, configuração e orquestração.
 A plataforma é **orientada a eventos**: os serviços se comunicam de forma assíncrona via
 RabbitMQ em coreografia (sem orquestrador central), publicando e consumindo eventos de domínio.
 
-Esta leva orquestra apenas o serviço **`fcg-identity`** (identidade, autenticação, emissão de
-JWT). Os demais serviços (`fcg-catalog`, `fcg-payments`, `fcg-notifications`) entram
-**aditivamente** em levas seguintes — os pontos onde eles encaixam já estão marcados (comentados)
-no Compose e no `.env.example`.
+Esta leva orquestra dois serviços: **`fcg-identity`** (identidade, autenticação, emissão de
+JWT) e **`fcg-notifications`** (consome eventos e dispara notificações). Com os dois no ar, o
+primeiro **fluxo cross-service** da plataforma fecha em coreografia: o identity **publica**
+`UserCreatedEvent` e o notifications **consome**, enviando o e-mail de boas-vindas. Os demais
+serviços (`fcg-catalog`, `fcg-payments`) entram **aditivamente** em levas seguintes — os pontos
+onde eles encaixam já estão marcados (comentados) no Compose e no `.env.example`.
 
 ## Topologia (esta leva)
 
@@ -19,11 +21,16 @@ no Compose e no `.env.example`.
 flowchart LR
   client([cliente / curl]) -->|POST /api/usuarios| api[identity-api]
 
-  api --> sql[(SQL Server\nsqlserver-identity)]
+  api --> sql[(SQL Server<br/>sqlserver-identity)]
   api -->|UserCreatedEvent| mq[(RabbitMQ)]
 
+  mq -->|user-created.fcg-notifications| notif[notifications-api]
+  notif --> redis[(Redis<br/>idempotência)]
+
   api -->|logs · push| loki[(Loki)]
+  notif -->|logs · push| loki
   api -->|OTLP gRPC :4317| col[OTel Collector]
+  notif -->|OTLP gRPC :4317| col
   col -->|traces| tempo[(Tempo)]
   col -->|/metrics :8889| prom[(Prometheus)]
 
@@ -32,11 +39,20 @@ flowchart LR
   prom --> graf
 ```
 
-- **Logs:** o `identity-api` faz push direto no Loki (sink Serilog), com o label `app=fcg-identity`.
-- **Traces e métricas:** o `identity-api` exporta os dois pelo mesmo OTLP gRPC para o OTel
+- **Logs:** `identity-api` e `notifications-api` fazem push direto no Loki (sink Serilog), cada
+  um com seu label (`app=fcg-identity` e `app=fcg-notifications`) — o agregado `{app=~"fcg-.*"}`
+  varre os dois.
+- **Traces e métricas:** os dois serviços exportam ambos pelo mesmo OTLP gRPC para o OTel
   Collector, que roteia **traces → Tempo** e expõe **métricas em `:8889`** para o Prometheus
   fazer scrape.
-- **UI única:** o Grafana lê os três backends, permitindo correlação clicável entre logs e traces.
+- **Fluxo cross-service:** a aresta `user-created` antes era publicada e **descartada** (fanout
+  sem fila bound — não havia consumidor). Agora o `notifications-api` a **consome** pela fila
+  `user-created.fcg-notifications`, dispara o e-mail de boas-vindas e grava no Redis a chave de
+  idempotência (TTL 24h, evita reenvio em reentrega). É o primeiro fluxo cross-service em
+  coreografia da plataforma.
+- **UI única:** o Grafana lê os três backends, permitindo correlação clicável entre logs e
+  traces — inclusive cruzando os dois serviços, já que o contexto de trace propaga do publish
+  (identity) ao consume (notifications) pelo header da mensagem.
 
 ---
 
@@ -159,10 +175,10 @@ cp .env.example .env        # preencha os valores reais
 bash scripts/init-secrets.sh
 ```
 
-O `init-secrets.sh` lê o `.env`, gera (ou reaproveita) a chave RSA e escreve os quatro Secrets
-reais — `sqlserver-identity/secret.yaml`, `rabbitmq/secret.yaml`, `identity/secret.yaml` e
-`identity/secret-jwt.yaml` (com o PEM como block scalar). Esses arquivos `secret.yaml` **não são
-versionados**.
+O `init-secrets.sh` lê o `.env`, gera (ou reaproveita) a chave RSA e escreve os seis Secrets
+reais — `sqlserver-identity/secret.yaml`, `rabbitmq/secret.yaml`, `redis/secret.yaml`,
+`identity/secret.yaml`, `identity/secret-jwt.yaml` (com o PEM como block scalar) e
+`notifications/secret.yaml`. Esses arquivos `secret.yaml` **não são versionados**.
 
 <details>
 <summary>Alternativa manual (sem o script)</summary>
@@ -172,8 +188,10 @@ Para cada componente, copie o template e preencha os placeholders à mão:
 ```bash
 cp k8s/01-infra/sqlserver-identity/secret.example.yaml k8s/01-infra/sqlserver-identity/secret.yaml
 cp k8s/01-infra/rabbitmq/secret.example.yaml          k8s/01-infra/rabbitmq/secret.yaml
+cp k8s/01-infra/redis/secret.example.yaml             k8s/01-infra/redis/secret.yaml
 cp k8s/03-services/identity/secret.example.yaml       k8s/03-services/identity/secret.yaml
 cp k8s/03-services/identity/secret-jwt.example.yaml   k8s/03-services/identity/secret-jwt.yaml
+cp k8s/03-services/notifications/secret.example.yaml  k8s/03-services/notifications/secret.yaml
 # edite cada secret.yaml e substitua os PLACEHOLDER pelos valores reais;
 # no secret-jwt.yaml, cole o PEM gerado por scripts/gen-rsa-key.sh no block scalar.
 ```
@@ -228,9 +246,13 @@ Todos os Services são `ClusterIP`; o acesso pelo navegador/curl é via `kubectl
 kubectl port-forward svc/grafana       3000:3000   -n fcg   # http://localhost:3000
 kubectl port-forward svc/rabbitmq      15672:15672 -n fcg   # http://localhost:15672
 kubectl port-forward svc/identity-api  8081:80     -n fcg   # http://localhost:8081
+kubectl port-forward svc/notifications-api 8082:80 -n fcg   # http://localhost:8082/health/ready
 ```
 
-Com o identity exposto, o mesmo `curl` da seção de Compose vale (`POST /api/usuarios`).
+Com o identity exposto, o mesmo `curl` da seção de Compose vale (`POST /api/usuarios`). O
+`notifications-api` é **consumer-only** (sem REST de negócio): seu port-forward serve só para o
+diagnóstico de health (`/health/live`, `/health/ready`) — a lógica roda nos consumers em
+background; o efeito do cadastro aparece é no log do pod e nos sinais do Grafana.
 
 ---
 
@@ -262,12 +284,18 @@ avulso — todo Pod nasce sob um controller que cuida de recriação, ordem e es
 | Carga | Controller | Por quê | Serviços |
 |---|---|---|---|
 | Com estado | **StatefulSet + PVC** | identidade de rede estável e volume persistente por pod | `sqlserver-identity`, `rabbitmq` |
-| Sem estado | **Deployment** | réplicas intercambiáveis; telemetria descartável | `identity-api`, Loki/Tempo/Prometheus/Grafana, OTel Collector |
+| Sem estado | **Deployment** | réplicas intercambiáveis; estado descartável | `identity-api`, `notifications-api`, `redis`, Loki/Tempo/Prometheus/Grafana, OTel Collector |
 | Tarefa única | **Job** | roda uma vez até concluir e encerra | `identity-migrate` (migrations do banco) |
 
 Assim o banco e o broker preservam dados entre reinícios (StatefulSet), as aplicações escalam e
 se recuperam sozinhas (Deployment), e a migration executa uma vez e sai (Job) — cada Pod sob o
 controller correto para o seu papel.
+
+O `redis` aparece na linha **Deployment** (não StatefulSet) de propósito: ele guarda **só a
+idempotência descartável** do notifications — a chave `notifications:processed:{MessageId}` com
+TTL de 24h, sobre `emptyDir`. Perder esse estado num restart não corrompe nada: o pior caso é
+reprocessar uma mensagem dentro da janela (e-mail duplicado), nunca dado inconsistente. Por isso
+não precisa de identidade de rede estável nem de volume persistente — o controller stateless basta.
 
 ---
 
@@ -275,7 +303,7 @@ controller correto para o seu papel.
 
 ```
 fcg-ops/
-├── docker-compose.yml                     # stack local completa (infra + observabilidade + identity)
+├── docker-compose.yml                     # stack local completa (infra + observabilidade + identity + notifications)
 ├── docker-compose.override.example.yml    # template do override de chave RSA (placeholder)
 ├── .env.example                           # template das variáveis (placeholders)
 ├── scripts/
@@ -286,7 +314,10 @@ fcg-ops/
 ├── observability/                          # configs canônicas (Loki, Tempo, Prometheus, Grafana, OTel)
 └── k8s/
     ├── 00-namespace.yaml
-    ├── 01-infra/                           # sqlserver-identity, rabbitmq (StatefulSet + PVC)
+    ├── 01-infra/                           # sqlserver-identity, rabbitmq (StatefulSet + PVC), redis (Deployment + emptyDir)
+    │   └── redis/                          # deployment, service, secret(s)
     ├── 02-observability/                   # loki, tempo, prometheus, grafana, otel-collector
-    └── 03-services/identity/               # configmap, secret(s), migrate-job, deployment, service
+    └── 03-services/                        # apps stateless
+        ├── identity/                       # configmap, secret(s), migrate-job, deployment, service
+        └── notifications/                  # configmap, secret(s), deployment, service (consumer-only, sem migrate-job)
 ```
