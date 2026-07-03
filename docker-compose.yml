@@ -173,6 +173,50 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       Loki__Url: http://loki:3100
 
+  # ---------- orquestracao do catalog ----------
+  # One-shot: aplica as migrations e semeia o catalogo de jogos (seed idempotente),
+  # encerrando sem subir host. So precisa do Postgres; nao toca broker nem auth.
+  catalog-migrate:
+    build:
+      context: ../fcg-catalog
+      secrets: [gh_token]
+    image: ghcr.io/reinaldogez/fcg-catalog:latest
+    command: ["dotnet", "Fcg.Catalog.Api.dll", "--migrate", "--seed"]
+    restart: "no"
+    depends_on:
+      postgres-catalog: { condition: service_healthy }
+    environment:
+      ConnectionStrings__Catalog: ${CATALOG_DB_CONNECTION}
+
+  # API de catalogo: resource server que valida tokens do identity via JWKS
+  # (busca lazy com retry na primeira request autenticada; por isso sem depends_on
+  # do identity-api — nao ha acoplamento de boot).
+  catalog-api:
+    build:
+      context: ../fcg-catalog
+      secrets: [gh_token]
+    image: ghcr.io/reinaldogez/fcg-catalog:latest
+    ports:
+      - "8083:8080"   # host 8083 -> container 8080
+    depends_on:
+      postgres-catalog: { condition: service_healthy }
+      rabbitmq:         { condition: service_healthy }
+      catalog-migrate:  { condition: service_completed_successfully }
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__Catalog: ${CATALOG_DB_CONNECTION}
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Port: "5672"
+      RabbitMq__Username: ${RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      Jwt__JwksUri: http://identity-api:8080/.well-known/jwks.json
+      Jwt__RequireHttpsMetadata: "false"   # JWKS por http na rede interna do compose
+      Jwt__Issuer: fcg-identity
+      Jwt__Audience: fcg
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      Loki__Url: http://loki:3100
+
   # ---------- infraestrutura de dados das proximas levas (placeholders, ainda inativos) ----------
   # Descomentar quando payments entrar.
   # postgres-payments:
