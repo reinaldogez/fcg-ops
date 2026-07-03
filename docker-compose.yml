@@ -17,6 +17,24 @@ services:
     volumes:
       - "sqlserver-identity-data:/var/opt/mssql"
 
+  # Banco relacional do catalog: estado que importa (seed de jogos, pedidos) -> volume
+  # nomeado. Endereco por nome de servico (postgres-catalog:5432) na rede interna;
+  # sem porta no host.
+  postgres-catalog:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_CATALOG_PASSWORD}
+      POSTGRES_DB: catalog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d catalog"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - "postgres-catalog-data:/var/lib/postgresql/data"
+
   # Store de idempotencia descartavel (TTL curto): sem volume nomeado, fs efemero do
   # container. Endereco por nome de servico (redis:6379) na rede interna; sem porta no host.
   redis:
@@ -156,20 +174,7 @@ services:
       Loki__Url: http://loki:3100
 
   # ---------- infraestrutura de dados das proximas levas (placeholders, ainda inativos) ----------
-  # Descomentar quando catalog/payments/notifications entrarem.
-  # postgres-catalog:
-  #   image: postgres:16-alpine
-  #   environment:
-  #     POSTGRES_PASSWORD: ${POSTGRES_CATALOG_PASSWORD}
-  #     POSTGRES_DB: catalog
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 10
-  #   volumes:
-  #     - "postgres-catalog-data:/var/lib/postgresql/data"
-  #
+  # Descomentar quando payments entrar.
   # postgres-payments:
   #   image: postgres:16-alpine
   #   environment:
@@ -185,6 +190,7 @@ services:
 
 volumes:
   sqlserver-identity-data:
+  postgres-catalog-data:
   rabbitmq-data:
 
 # Ponteiro do secret de build: o PAT vem da env var GH_TOKEN exportada no shell no momento
