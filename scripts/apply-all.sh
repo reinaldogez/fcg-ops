@@ -15,9 +15,11 @@ REQUIRED_SECRETS=(
   "$K8S/01-infra/sqlserver-identity/secret.yaml"
   "$K8S/01-infra/rabbitmq/secret.yaml"
   "$K8S/01-infra/redis/secret.yaml"
+  "$K8S/01-infra/postgres-catalog/secret.yaml"
   "$K8S/03-services/identity/secret.yaml"
   "$K8S/03-services/identity/secret-jwt.yaml"
   "$K8S/03-services/notifications/secret.yaml"
+  "$K8S/03-services/catalog/secret.yaml"
 )
 missing=0
 for f in "${REQUIRED_SECRETS[@]}"; do
@@ -30,7 +32,7 @@ if [[ "$missing" -ne 0 ]]; then
   echo "" >&2
   echo "como resolver:" >&2
   echo "  1) preencha os valores reais no .env (cp .env.example .env, depois edite);" >&2
-  echo "  2) materialize os Secrets com 'bash scripts/init-secrets.sh' (gera a chave RSA e os 4 secret.yaml)." >&2
+  echo "  2) materialize os Secrets com 'bash scripts/init-secrets.sh' (gera a chave RSA e os secret.yaml)." >&2
   echo "  alternativa manual: copie cada secret.example.yaml para secret.yaml e preencha à mão." >&2
   exit 1
 fi
@@ -51,6 +53,7 @@ echo "    aguardando infra ficar Ready..."
 kubectl wait --for=condition=ready pod -l app=sqlserver-identity -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=rabbitmq          -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=redis             -n "$NS" --timeout="$TIMEOUT"
+kubectl wait --for=condition=ready pod -l app=postgres-catalog  -n "$NS" --timeout="$TIMEOUT"
 
 echo "==> 02-observability"
 apply_dir "$K8S/02-observability"
@@ -65,6 +68,16 @@ echo "    aguardando migration concluir..."
 kubectl wait --for=condition=complete job/identity-migrate -n "$NS" --timeout="$TIMEOUT"
 kubectl apply -f "$ID/deployment.yaml"
 kubectl apply -f "$ID/service.yaml"
+
+echo "==> 03-services/catalog (Job de migration+seed antes do Deployment)"
+CT="$K8S/03-services/catalog"
+kubectl apply -f "$CT/configmap.yaml"
+kubectl apply -f "$CT/secret.yaml"
+kubectl apply -f "$CT/migrate-job.yaml"
+echo "    aguardando migration+seed concluir..."
+kubectl wait --for=condition=complete job/catalog-migrate -n "$NS" --timeout="$TIMEOUT"
+kubectl apply -f "$CT/deployment.yaml"
+kubectl apply -f "$CT/service.yaml"
 
 echo "==> 03-services/notifications"
 NT="$K8S/03-services/notifications"
