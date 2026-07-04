@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-catalog
+  namespace: fcg
+spec:
+  clusterIP: None
+  selector:
+    app: postgres-catalog
+  ports:
+    - port: 5432
+      targetPort: 5432

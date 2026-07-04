@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-config
+  namespace: fcg
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  ASPNETCORE_HTTP_PORTS: "8080"
+  RabbitMq__Host: "rabbitmq"
+  RabbitMq__Port: "5672"
+  # JWKS servido pelo identity dentro do cluster (Service identity-api, porta 80).
+  # Como o endpoint e http (sem TLS na rede interna), RequireHttpsMetadata precisa
+  # ser "false" — com o default true o catalog recusa o JWKS e rejeita todo token.
+  # Issuer/Audience devem casar EXATAMENTE com o que o identity emite no cluster.
+  Jwt__JwksUri: "http://identity-api/.well-known/jwks.json"
+  Jwt__Issuer: "fcg-identity"
+  Jwt__Audience: "fcg"
+  Jwt__RequireHttpsMetadata: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  Loki__Url: "http://loki:3100"
