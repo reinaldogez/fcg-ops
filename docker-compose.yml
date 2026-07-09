@@ -35,6 +35,24 @@ services:
     volumes:
       - "postgres-catalog-data:/var/lib/postgresql/data"
 
+  # Banco relacional do payments: estado que importa (decisoes de pagamento) -> volume
+  # nomeado. Endereco por nome de servico (postgres-payments:5432) na rede interna;
+  # sem porta no host.
+  postgres-payments:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PAYMENTS_PASSWORD}
+      POSTGRES_DB: payments
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - "postgres-payments-data:/var/lib/postgresql/data"
+
   # Store de idempotencia descartavel (TTL curto): sem volume nomeado, fs efemero do
   # container. Endereco por nome de servico (redis:6379) na rede interna; sem porta no host.
   redis:
@@ -217,24 +235,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       Loki__Url: http://loki:3100
 
-  # ---------- infraestrutura de dados das proximas levas (placeholders, ainda inativos) ----------
-  # Descomentar quando payments entrar.
-  # postgres-payments:
-  #   image: postgres:16-alpine
-  #   environment:
-  #     POSTGRES_PASSWORD: ${POSTGRES_PAYMENTS_PASSWORD}
-  #     POSTGRES_DB: payments
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U postgres"]
-  #     interval: 5s
-  #     timeout: 3s
-  #     retries: 10
-  #   volumes:
-  #     - "postgres-payments-data:/var/lib/postgresql/data"
-
 volumes:
   sqlserver-identity-data:
   postgres-catalog-data:
+  postgres-payments-data:
   rabbitmq-data:
 
 # Ponteiro do secret de build: o PAT vem da env var GH_TOKEN exportada no shell no momento
