@@ -235,6 +235,47 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       Loki__Url: http://loki:3100
 
+  # ---------- orquestracao do payments ----------
+  # One-shot: aplica as migrations e encerra (nao sobe host) antes do worker subir.
+  # So precisa do Postgres; nao semeia dados nem toca broker/auth.
+  payments-migrate:
+    build:
+      context: ../fcg-payments
+      secrets: [gh_token]
+    image: ghcr.io/reinaldogez/fcg-payments:latest
+    command: ["dotnet", "Fcg.Payments.Api.dll", "--migrate"]
+    restart: "no"
+    depends_on:
+      postgres-payments: { condition: service_healthy }
+    environment:
+      ConnectionStrings__Payments: ${PAYMENTS_DB_CONNECTION}
+
+  # Worker de pagamentos: consumer-only + publisher (MassTransit em background); o HTTP
+  # expoe so /health/live e /health/ready (Postgres) — sem REST de negocio, sem auth.
+  # A fila order-placed.fcg-payments e criada no startup; sem acoplamento de boot ao catalog.
+  payments-api:
+    build:
+      context: ../fcg-payments
+      secrets: [gh_token]
+    image: ghcr.io/reinaldogez/fcg-payments:latest
+    ports:
+      - "8084:8080"   # diagnostico de health no host (8081/8082/8083 ja usados); nao e REST de negocio
+    depends_on:
+      postgres-payments: { condition: service_healthy }
+      rabbitmq:          { condition: service_healthy }
+      payments-migrate:  { condition: service_completed_successfully }
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__Payments: ${PAYMENTS_DB_CONNECTION}
+      RabbitMq__Host: rabbitmq
+      RabbitMq__Port: "5672"
+      RabbitMq__Username: ${RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      Payment__RejectionThreshold: "5000"   # gateway simulado: preco <= threshold aprova, > rejeita
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      Loki__Url: http://loki:3100
+
 volumes:
   sqlserver-identity-data:
   postgres-catalog-data:
