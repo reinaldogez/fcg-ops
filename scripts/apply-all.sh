@@ -16,10 +16,12 @@ REQUIRED_SECRETS=(
   "$K8S/01-infra/rabbitmq/secret.yaml"
   "$K8S/01-infra/redis/secret.yaml"
   "$K8S/01-infra/postgres-catalog/secret.yaml"
+  "$K8S/01-infra/postgres-payments/secret.yaml"
   "$K8S/03-services/identity/secret.yaml"
   "$K8S/03-services/identity/secret-jwt.yaml"
   "$K8S/03-services/notifications/secret.yaml"
   "$K8S/03-services/catalog/secret.yaml"
+  "$K8S/03-services/payments/secret.yaml"
 )
 missing=0
 for f in "${REQUIRED_SECRETS[@]}"; do
@@ -54,6 +56,7 @@ kubectl wait --for=condition=ready pod -l app=sqlserver-identity -n "$NS" --time
 kubectl wait --for=condition=ready pod -l app=rabbitmq          -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=redis             -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=postgres-catalog  -n "$NS" --timeout="$TIMEOUT"
+kubectl wait --for=condition=ready pod -l app=postgres-payments -n "$NS" --timeout="$TIMEOUT"
 
 echo "==> 02-observability"
 apply_dir "$K8S/02-observability"
@@ -85,6 +88,16 @@ kubectl apply -f "$NT/configmap.yaml"
 kubectl apply -f "$NT/secret.yaml"
 kubectl apply -f "$NT/deployment.yaml"
 kubectl apply -f "$NT/service.yaml"
+
+echo "==> 03-services/payments (Job de migration antes do Deployment)"
+PY="$K8S/03-services/payments"
+kubectl apply -f "$PY/configmap.yaml"
+kubectl apply -f "$PY/secret.yaml"
+kubectl apply -f "$PY/migrate-job.yaml"
+echo "    aguardando migration concluir..."
+kubectl wait --for=condition=complete job/payments-migrate -n "$NS" --timeout="$TIMEOUT"
+kubectl apply -f "$PY/deployment.yaml"
+kubectl apply -f "$PY/service.yaml"
 
 echo ""
 echo "ok: manifestos aplicados. Acompanhe com: kubectl get pods -n $NS -w"
