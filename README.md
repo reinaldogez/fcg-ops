@@ -8,15 +8,16 @@ aplicação — só composição, configuração e orquestração.
 A plataforma é **orientada a eventos**: os serviços se comunicam de forma assíncrona via
 RabbitMQ em coreografia (sem orquestrador central), publicando e consumindo eventos de domínio.
 
-A plataforma orquestra três serviços — três **domínios**: **`fcg-identity`** (identidade,
-autenticação, emissão de JWT), **`fcg-catalog`** (catálogo de jogos, pedidos e biblioteca) e
-**`fcg-notifications`** (consome eventos e dispara notificações). Com identity e notifications
-no ar, o primeiro **fluxo cross-service** fecha em coreografia: o identity **publica**
-`UserCreatedEvent` e o notifications **consome**, enviando o e-mail de boas-vindas. Com o
-catalog, entram a primeira **integração de autenticação entre serviços** (o catalog valida os
-JWT emitidos pelo identity) e a ponta inicial da **saga de compra**. O `fcg-payments` entra
-**aditivamente** numa leva seguinte e fecha essa saga — o ponto onde ele encaixa já está
-marcado (comentado) no Compose e no `.env.example`.
+A plataforma orquestra os quatro serviços — quatro **domínios**:
+**`fcg-identity`** (identidade, autenticação, emissão de JWT), **`fcg-catalog`** (catálogo de
+jogos, pedidos e biblioteca), **`fcg-payments`** (processamento de pagamento) e
+**`fcg-notifications`** (consome eventos e dispara notificações). O primeiro **fluxo
+cross-service** fecha em coreografia: o identity **publica** `UserCreatedEvent` e o
+notifications **consome**, enviando o e-mail de boas-vindas. O catalog traz a primeira
+**integração de autenticação entre serviços** (valida os JWT emitidos pelo identity) e, com o
+payments, a **saga de compra** fecha de ponta a ponta: pedido → pagamento → biblioteca +
+notificação, tudo por eventos. Não há serviços pendentes de orquestração — os quatro rodam
+em Compose e em Kubernetes.
 
 ## Topologia
 
@@ -34,25 +35,31 @@ flowchart LR
   cat -.->|valida JWT · JWKS| api
   cat -->|OrderPlacedEvent| mq
 
-  mq -->|user-created.fcg-notifications| notif[notifications-api]
-  notif --> redis[(Redis<br/>idempotência)]
+  mq -->|order-placed.fcg-payments| pay[payments-api]
+  pay --> pgp[(PostgreSQL<br/>postgres-payments)]
+  pay -->|PaymentProcessedEvent| mq
 
-  mq -.->|payment-processed.fcg-catalog| cat
+  mq -->|payment-processed.fcg-catalog| cat
+  mq -->|user-created.fcg-notifications| notif[notifications-api]
+  mq -->|payment-processed.fcg-notifications| notif
+  notif --> redis[(Redis<br/>idempotência)]
 ```
 
 ### Telemetria
 
-Os três serviços emitem os mesmos sinais pelos mesmos caminhos — logs por push direto no
+Os quatro serviços emitem os mesmos sinais pelos mesmos caminhos — logs por push direto no
 Loki, traces e métricas por OTLP no Collector:
 
 ```mermaid
 flowchart LR
   api[identity-api] -->|logs · push| loki[(Loki)]
   cat[catalog-api] -->|logs · push| loki
+  pay[payments-api] -->|logs · push| loki
   notif[notifications-api] -->|logs · push| loki
 
   api -->|OTLP gRPC :4317| col[OTel Collector]
   cat -->|OTLP gRPC :4317| col
+  pay -->|OTLP gRPC :4317| col
   notif -->|OTLP gRPC :4317| col
 
   col -->|traces| tempo[(Tempo)]
@@ -63,30 +70,35 @@ flowchart LR
   prom --> graf
 ```
 
-- **Logs:** os três serviços fazem push direto no Loki (sink Serilog), cada um com seu label
-  (`app=fcg-identity`, `app=fcg-notifications` e `app=fcg-catalog`) — o agregado
-  `{app=~"fcg-.*"}` varre os três.
-- **Traces e métricas:** os três serviços exportam ambos pelo mesmo OTLP gRPC para o OTel
+- **Logs:** os quatro serviços fazem push direto no Loki (sink Serilog), cada um com seu label
+  (`app=fcg-identity`, `app=fcg-notifications`, `app=fcg-catalog` e `app=fcg-payments`) — o
+  agregado `{app=~"fcg-.*"}` varre os quatro.
+- **Traces e métricas:** os quatro serviços exportam ambos pelo mesmo OTLP gRPC para o OTel
   Collector, que roteia **traces → Tempo** e expõe **métricas em `:8889`** para o Prometheus
-  fazer scrape.
+  fazer scrape (o payments aparece como `Fcg.Payments.Api`, seu service name OTel).
 - **Auth cross-service:** o `catalog-api` é **resource server** — valida os tokens emitidos
   pelo `identity-api` baixando o JWKS (`/.well-known/jwks.json`) direto do identity, sem OIDC
   discovery. Issuer `fcg-identity`, Audience `fcg`. É a primeira integração de autenticação
   entre serviços da plataforma: a aresta tracejada `catalog-api -.-> identity-api` do diagrama
   é dependência de **auth**, não de dados.
-- **Fluxo de compra (parcial):** `POST /api/pedidos` publica `OrderPlacedEvent` na exchange
-  `order-placed` — hoje **descartado** (fanout sem fila bound: o `fcg-payments`, que o
-  consumiria, ainda não existe). Na outra ponta, o catalog já **consome**
-  `PaymentProcessedEvent` pela fila `payment-processed.fcg-catalog` (bound, ociosa — ninguém
-  publica). A saga pedido → pagamento → biblioteca **fecha quando o payments entrar**.
+- **Saga de compra (completa):** `POST /api/pedidos` publica `OrderPlacedEvent` na exchange
+  `order-placed` → o `payments-api` **consome** pela fila `order-placed.fcg-payments`, decide
+  o pagamento pelo preço (aprova se ≤ `Payment:RejectionThreshold`, default `5000`; rejeita
+  acima) e **publica** `PaymentProcessedEvent` na exchange `payment-processed` → o **catalog**
+  consome (`payment-processed.fcg-catalog`: credita a biblioteca no aprovado; marca o pedido
+  `Rejeitado` na recusa) e o **notifications** consome (`payment-processed.fcg-notifications`:
+  e-mail de confirmação ou recusa). Coreografia pura — cada serviço reage a eventos, sem
+  orquestrador central.
 - **Fluxo cross-service:** a aresta `user-created` antes era publicada e **descartada** (fanout
   sem fila bound — não havia consumidor). Agora o `notifications-api` a **consome** pela fila
   `user-created.fcg-notifications`, dispara o e-mail de boas-vindas e grava no Redis a chave de
   idempotência (TTL 24h, evita reenvio em reentrega). É o primeiro fluxo cross-service em
   coreografia da plataforma.
 - **UI única:** o Grafana lê os três backends, permitindo correlação clicável entre logs e
-  traces — inclusive cruzando os dois serviços, já que o contexto de trace propaga do publish
-  (identity) ao consume (notifications) pelo header da mensagem.
+  traces — inclusive cruzando serviços, já que o contexto de trace propaga do publish ao
+  consume pelo header da mensagem. Um pedido aprovado gera um **trace único atravessando a
+  saga**: catalog (publish `order-placed`) → payments (consume → processa → publish
+  `payment-processed`) → catalog (credita a biblioteca) + notifications (e-mail).
 
 ---
 
@@ -209,11 +221,12 @@ cp .env.example .env        # preencha os valores reais
 bash scripts/init-secrets.sh
 ```
 
-O `init-secrets.sh` lê o `.env`, gera (ou reaproveita) a chave RSA e escreve os oito Secrets
+O `init-secrets.sh` lê o `.env`, gera (ou reaproveita) a chave RSA e escreve os dez Secrets
 reais — `sqlserver-identity/secret.yaml`, `rabbitmq/secret.yaml`, `redis/secret.yaml`,
-`postgres-catalog/secret.yaml`, `identity/secret.yaml`, `identity/secret-jwt.yaml` (com o PEM
-como block scalar), `notifications/secret.yaml` e `catalog/secret.yaml`. Esses arquivos
-`secret.yaml` **não são versionados**.
+`postgres-catalog/secret.yaml`, `postgres-payments/secret.yaml`, `identity/secret.yaml`,
+`identity/secret-jwt.yaml` (com o PEM como block scalar), `notifications/secret.yaml`,
+`catalog/secret.yaml` e `payments/secret.yaml`. Esses arquivos `secret.yaml` **não são
+versionados**.
 
 <details>
 <summary>Alternativa manual (sem o script)</summary>
@@ -225,10 +238,12 @@ cp k8s/01-infra/sqlserver-identity/secret.example.yaml k8s/01-infra/sqlserver-id
 cp k8s/01-infra/rabbitmq/secret.example.yaml          k8s/01-infra/rabbitmq/secret.yaml
 cp k8s/01-infra/redis/secret.example.yaml             k8s/01-infra/redis/secret.yaml
 cp k8s/01-infra/postgres-catalog/secret.example.yaml  k8s/01-infra/postgres-catalog/secret.yaml
+cp k8s/01-infra/postgres-payments/secret.example.yaml k8s/01-infra/postgres-payments/secret.yaml
 cp k8s/03-services/identity/secret.example.yaml       k8s/03-services/identity/secret.yaml
 cp k8s/03-services/identity/secret-jwt.example.yaml   k8s/03-services/identity/secret-jwt.yaml
 cp k8s/03-services/notifications/secret.example.yaml  k8s/03-services/notifications/secret.yaml
 cp k8s/03-services/catalog/secret.example.yaml        k8s/03-services/catalog/secret.yaml
+cp k8s/03-services/payments/secret.example.yaml       k8s/03-services/payments/secret.yaml
 # edite cada secret.yaml e substitua os PLACEHOLDER pelos valores reais;
 # no secret-jwt.yaml, cole o PEM gerado por scripts/gen-rsa-key.sh no block scalar.
 ```
@@ -251,8 +266,8 @@ bash scripts/apply-all.sh
 
 O script aplica em ordem de boot — namespace → infra (com `kubectl wait` até os pods ficarem
 ready) → observabilidade → serviços, esperando cada Job de migration concluir
-(`kubectl wait --for=condition=complete` no `identity-migrate` e no `catalog-migrate`, este com
-migrate+seed) antes de subir o Deployment correspondente. Os `*.example.yaml` são templates e
+(`kubectl wait --for=condition=complete` no `identity-migrate`, no `catalog-migrate` — este com
+migrate+seed — e no `payments-migrate`) antes de subir o Deployment correspondente. Os `*.example.yaml` são templates e
 **não** são aplicados.
 
 #### Convenção de Secrets (template versionado / real ignorado)
@@ -286,15 +301,16 @@ kubectl port-forward svc/rabbitmq      15672:15672 -n fcg   # http://localhost:1
 kubectl port-forward svc/identity-api  8081:80     -n fcg   # http://localhost:8081
 kubectl port-forward svc/notifications-api 8082:80 -n fcg   # http://localhost:8082/health/ready
 kubectl port-forward svc/catalog-api   8083:80     -n fcg   # http://localhost:8083 (REST: /api/jogos, /api/pedidos — requer token do identity)
+kubectl port-forward svc/payments-api  8084:80     -n fcg   # http://localhost:8084/health/ready (consumer-only, health apenas)
 ```
 
 Com o identity exposto, o mesmo `curl` da seção de Compose vale (`POST /api/usuarios`). O
-`notifications-api` é **consumer-only** (sem REST de negócio): seu port-forward serve só para o
-diagnóstico de health (`/health/live`, `/health/ready`) — a lógica roda nos consumers em
-background; o efeito do cadastro aparece é no log do pod e nos sinais do Grafana. O
-`catalog-api` é o oposto: tem REST de negócio (`/api/jogos`, `/api/pedidos`, `/api/biblioteca`)
-e exige nos endpoints protegidos um token emitido pelo identity (login em
-`POST /api/auth/login` no `:8081`).
+`notifications-api` e o `payments-api` são **consumer-only** (sem REST de negócio): seus
+port-forwards servem só para o diagnóstico de health (`/health/live`, `/health/ready`) — a
+lógica roda nos consumers em background; o efeito do cadastro e das compras aparece é no log
+dos pods e nos sinais do Grafana. O `catalog-api` é o oposto: tem REST de negócio
+(`/api/jogos`, `/api/pedidos`, `/api/biblioteca`) e exige nos endpoints protegidos um token
+emitido pelo identity (login em `POST /api/auth/login` no `:8081`).
 
 ---
 
@@ -316,14 +332,15 @@ avulso — todo Pod nasce sob um controller que cuida de recriação, ordem e es
 
 | Carga | Controller | Por quê | Serviços |
 |---|---|---|---|
-| Com estado | **StatefulSet + PVC** | identidade de rede estável e volume persistente por pod | `sqlserver-identity`, `postgres-catalog`, `rabbitmq` |
-| Sem estado | **Deployment** | réplicas intercambiáveis; estado descartável | `identity-api`, `catalog-api`, `notifications-api`, `redis`, Loki/Tempo/Prometheus/Grafana, OTel Collector |
-| Tarefa única | **Job** | roda uma vez até concluir e encerra | `identity-migrate` (migrations), `catalog-migrate` (migrations + seed do catálogo) |
+| Com estado | **StatefulSet + PVC** | identidade de rede estável e volume persistente por pod | `sqlserver-identity`, `postgres-catalog`, `postgres-payments`, `rabbitmq` |
+| Sem estado | **Deployment** | réplicas intercambiáveis; estado descartável | `identity-api`, `catalog-api`, `payments-api`, `notifications-api`, `redis`, Loki/Tempo/Prometheus/Grafana, OTel Collector |
+| Tarefa única | **Job** | roda uma vez até concluir e encerra | `identity-migrate` (migrations), `catalog-migrate` (migrations + seed do catálogo), `payments-migrate` (migrations, sem seed) |
 
 Assim os bancos e o broker preservam dados entre reinícios (StatefulSet), as aplicações escalam
 e se recuperam sozinhas (Deployment), e as migrations executam uma vez e saem (Job) — cada Pod
-sob o controller correto para o seu papel. O `postgres-catalog` segue o mesmo raciocínio do
-`sqlserver-identity`: banco relacional cujo estado importa → StatefulSet + PVC.
+sob o controller correto para o seu papel. O `postgres-catalog` e o `postgres-payments` seguem
+o mesmo raciocínio do `sqlserver-identity`: banco relacional cujo estado importa →
+StatefulSet + PVC.
 
 O `redis` aparece na linha **Deployment** (não StatefulSet) de propósito: ele guarda **só a
 idempotência descartável** do notifications — a chave `notifications:processed:{MessageId}` com
@@ -337,7 +354,7 @@ não precisa de identidade de rede estável nem de volume persistente — o cont
 
 ```
 fcg-ops/
-├── docker-compose.yml                     # stack local completa (infra + observabilidade + identity + notifications + catalog)
+├── docker-compose.yml                     # stack local completa (infra + observabilidade + identity + notifications + catalog + payments)
 ├── docker-compose.override.example.yml    # template do override de chave RSA (placeholder)
 ├── .env.example                           # template das variáveis (placeholders)
 ├── scripts/
@@ -348,12 +365,16 @@ fcg-ops/
 ├── observability/                          # configs canônicas (Loki, Tempo, Prometheus, Grafana, OTel)
 └── k8s/
     ├── 00-namespace.yaml
-    ├── 01-infra/                           # sqlserver-identity, postgres-catalog, rabbitmq (StatefulSet + PVC), redis (Deployment + emptyDir)
+    ├── 01-infra/                           # sqlserver-identity, postgres-catalog, postgres-payments, rabbitmq (StatefulSet + PVC), redis (Deployment + emptyDir)
     │   ├── postgres-catalog/               # statefulset, service (headless), secret(s)
+    │   ├── postgres-payments/              # statefulset, service (headless), secret(s)
     │   └── redis/                          # deployment, service, secret(s)
     ├── 02-observability/                   # loki, tempo, prometheus, grafana, otel-collector
     └── 03-services/                        # apps stateless
         ├── catalog/                        # configmap, secret(s), migrate-job (migrate+seed), deployment, service
         ├── identity/                       # configmap, secret(s), migrate-job, deployment, service
-        └── notifications/                  # configmap, secret(s), deployment, service (consumer-only, sem migrate-job)
+        ├── notifications/                  # configmap, secret(s), deployment, service (consumer-only, sem migrate-job)
+        └── payments/                       # configmap, secret(s), migrate-job (só migrate), deployment, service (consumer-only)
 ```
+
+---
