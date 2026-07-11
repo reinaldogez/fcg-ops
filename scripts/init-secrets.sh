@@ -35,6 +35,8 @@ REDIS_PASSWORD="$(get_env REDIS_PASSWORD)"
 REDIS_CONNECTION="$(get_env REDIS_CONNECTION)"
 POSTGRES_CATALOG_PASSWORD="$(get_env POSTGRES_CATALOG_PASSWORD)"
 CATALOG_DB_CONNECTION="$(get_env CATALOG_DB_CONNECTION)"
+POSTGRES_PAYMENTS_PASSWORD="$(get_env POSTGRES_PAYMENTS_PASSWORD)"
+PAYMENTS_DB_CONNECTION="$(get_env PAYMENTS_DB_CONNECTION)"
 
 # Pré-condição: nenhuma var obrigatória pode estar vazia.
 missing=0
@@ -47,7 +49,9 @@ for pair in \
   "REDIS_PASSWORD=$REDIS_PASSWORD" \
   "REDIS_CONNECTION=$REDIS_CONNECTION" \
   "POSTGRES_CATALOG_PASSWORD=$POSTGRES_CATALOG_PASSWORD" \
-  "CATALOG_DB_CONNECTION=$CATALOG_DB_CONNECTION"; do
+  "CATALOG_DB_CONNECTION=$CATALOG_DB_CONNECTION" \
+  "POSTGRES_PAYMENTS_PASSWORD=$POSTGRES_PAYMENTS_PASSWORD" \
+  "PAYMENTS_DB_CONNECTION=$PAYMENTS_DB_CONNECTION"; do
   if [[ -z "${pair#*=}" ]]; then
     echo "erro: variável obrigatória vazia ou ausente no $ENV_FILE: ${pair%%=*}" >&2
     missing=1
@@ -56,7 +60,7 @@ done
 [[ "$missing" -eq 0 ]] || exit 1
 
 # Aviso (não bloqueante) se valores ainda forem os placeholders do .example.
-case "$SA_PASSWORD$RABBIT_PASSWORD$ADMIN_PASSWORD$REDIS_PASSWORD$POSTGRES_CATALOG_PASSWORD" in
+case "$SA_PASSWORD$RABBIT_PASSWORD$ADMIN_PASSWORD$REDIS_PASSWORD$POSTGRES_CATALOG_PASSWORD$POSTGRES_PAYMENTS_PASSWORD" in
   *ChangeMe*) echo "aviso: ainda há valores 'ChangeMe...' no $ENV_FILE — confira se são propositais." >&2 ;;
 esac
 
@@ -74,6 +78,13 @@ case "$CATALOG_DB_CONNECTION" in
   *) echo "aviso: CATALOG_DB_CONNECTION não embute a mesma senha de POSTGRES_CATALOG_PASSWORD no $ENV_FILE — devem casar." >&2 ;;
 esac
 
+# Mesma regra para o Postgres do payments: a senha do servidor (POSTGRES_PASSWORD)
+# tem de bater com a embutida na connection string do payments.
+case "$PAYMENTS_DB_CONNECTION" in
+  *"Password=$POSTGRES_PAYMENTS_PASSWORD"*) ;;
+  *) echo "aviso: PAYMENTS_DB_CONNECTION não embute a mesma senha de POSTGRES_PAYMENTS_PASSWORD no $ENV_FILE — devem casar." >&2 ;;
+esac
+
 # Chave RSA: gera só se ainda não existir; caso contrário reaproveita.
 if [[ ! -f "$PEM" ]]; then
   echo "chave RSA '$PEM' ausente — gerando..."
@@ -87,10 +98,12 @@ SQL_SECRET="k8s/01-infra/sqlserver-identity/secret.yaml"
 RABBIT_SECRET="k8s/01-infra/rabbitmq/secret.yaml"
 REDIS_SECRET="k8s/01-infra/redis/secret.yaml"
 POSTGRES_CATALOG_SECRET="k8s/01-infra/postgres-catalog/secret.yaml"
+POSTGRES_PAYMENTS_SECRET="k8s/01-infra/postgres-payments/secret.yaml"
 IDENTITY_SECRET="k8s/03-services/identity/secret.yaml"
 JWT_SECRET="k8s/03-services/identity/secret-jwt.yaml"
 NOTIFICATIONS_SECRET="k8s/03-services/notifications/secret.yaml"
 CATALOG_SECRET="k8s/03-services/catalog/secret.yaml"
+PAYMENTS_SECRET="k8s/03-services/payments/secret.yaml"
 
 cat > "$SQL_SECRET" <<EOF
 apiVersion: v1
@@ -135,6 +148,17 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_PASSWORD: '$(sq "$POSTGRES_CATALOG_PASSWORD")'
+EOF
+
+cat > "$POSTGRES_PAYMENTS_SECRET" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-payments-secret
+  namespace: fcg
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: '$(sq "$POSTGRES_PAYMENTS_PASSWORD")'
 EOF
 
 cat > "$IDENTITY_SECRET" <<EOF
@@ -193,13 +217,28 @@ stringData:
   RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
 EOF
 
+cat > "$PAYMENTS_SECRET" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payments-secret
+  namespace: fcg
+type: Opaque
+stringData:
+  ConnectionStrings__Payments: '$(sq "$PAYMENTS_DB_CONNECTION")'
+  RabbitMq__Username: '$(sq "$RABBIT_USER")'
+  RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
+EOF
+
 echo "ok: Secrets reais materializados a partir de '$ENV_FILE' (fora do git):"
 echo "  $SQL_SECRET"
 echo "  $RABBIT_SECRET"
 echo "  $REDIS_SECRET"
 echo "  $POSTGRES_CATALOG_SECRET"
+echo "  $POSTGRES_PAYMENTS_SECRET"
 echo "  $IDENTITY_SECRET"
 echo "  $JWT_SECRET"
 echo "  $NOTIFICATIONS_SECRET"
 echo "  $CATALOG_SECRET"
+echo "  $PAYMENTS_SECRET"
 echo "próximo passo: bash scripts/apply-all.sh"

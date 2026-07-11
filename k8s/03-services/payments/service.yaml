@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-api
+  namespace: fcg
+spec:
+  selector:
+    app: payments-api
+  ports:
+    - port: 80
+      targetPort: 8080
