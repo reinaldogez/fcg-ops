@@ -8,11 +8,16 @@ services:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: ${SQLSERVER_SA_PASSWORD}
     healthcheck:
+      # Nao basta o engine aceitar conexao (SELECT 1 no master responde antes dos bancos de
+      # usuario saírem do recovery). O migrate precisa do banco conectavel: se ele responde
+      # cedo demais, o EF le "banco inexistente", tenta CREATE DATABASE e morre no erro 1801.
+      # Entao a condicao e "nenhum banco fora de ONLINE" — vale no 1o boot (nenhum banco de
+      # usuario ainda) e nos seguintes (espera o identity voltar).
       # $$ escapa o $ para o compose nao interpolar: a var resolve dentro do container.
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -h -1 -W -Q \"SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE state_desc <> 'ONLINE'\" | grep -qx 0"]
+      interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 30
       start_period: 90s
     volumes:
       - "sqlserver-identity-data:/var/opt/mssql"
