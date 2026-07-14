@@ -25,6 +25,22 @@ spec:
           envFrom:
             - secretRef:
                 name: sqlserver-identity-secret
+          # A porta 1433 abre antes de o engine autenticar e de os bancos sairem do
+          # recovery. Pronto = nenhum banco fora de ONLINE (mesma condicao do healthcheck
+          # do Compose); ate la o Service nao roteia para o pod.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa
+                  -P "$MSSQL_SA_PASSWORD" -C -h -1 -W
+                  -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE state_desc <> 'ONLINE'"
+                  | grep -qx 0
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
           volumeMounts:
             - name: data
               mountPath: /var/opt/mssql

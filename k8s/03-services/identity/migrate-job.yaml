@@ -4,14 +4,30 @@ metadata:
   name: identity-migrate
   namespace: fcg
 spec:
-  backoffLimit: 3
+  # Margem para node frio: o primeiro pull da imagem do SQL Server pode levar minutos.
+  backoffLimit: 10
   template:
     spec:
       restartPolicy: OnFailure
       initContainers:
+        # A imagem do SQL Server nao provisiona banco no boot (nao ha equivalente ao
+        # POSTGRES_DB do Postgres) e o gate do migrate exige o banco existente antes de
+        # rodar. O init cria o banco vazio, idempotente; o schema segue sendo do migrate.
         - name: wait-for-db
-          image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z sqlserver-identity 1433; do sleep 2; done']
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          envFrom:
+            - secretRef:
+                name: sqlserver-identity-secret
+          command:
+            - /bin/sh
+            - -c
+            # -b: erro SQL vira exit code, senao o until passa em falso.
+            # [identity] entre colchetes: IDENTITY e palavra reservada em T-SQL.
+            - >-
+              until /opt/mssql-tools18/bin/sqlcmd -S sqlserver-identity -U sa
+              -P "$MSSQL_SA_PASSWORD" -C -b
+              -Q "IF DB_ID(N'identity') IS NULL CREATE DATABASE [identity]";
+              do sleep 5; done
       containers:
         - name: migrate
           image: ghcr.io/reinaldogez/fcg-identity:latest
