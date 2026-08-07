@@ -37,7 +37,6 @@ RABBIT_PASSWORD="$(get_env RABBITMQ_PASSWORD)"
 DB_CONNECTION="$(get_env IDENTITY_DB_CONNECTION)"
 ADMIN_PASSWORD="$(get_env ADMINSEED_PASSWORD)"
 REDIS_PASSWORD="$(get_env REDIS_PASSWORD)"
-REDIS_CONNECTION="$(get_env REDIS_CONNECTION)"
 POSTGRES_CATALOG_PASSWORD="$(get_env POSTGRES_CATALOG_PASSWORD)"
 CATALOG_DB_CONNECTION="$(get_env CATALOG_DB_CONNECTION)"
 POSTGRES_PAYMENTS_PASSWORD="$(get_env POSTGRES_PAYMENTS_PASSWORD)"
@@ -63,7 +62,6 @@ for pair in \
   "IDENTITY_DB_CONNECTION=$DB_CONNECTION" \
   "ADMINSEED_PASSWORD=$ADMIN_PASSWORD" \
   "REDIS_PASSWORD=$REDIS_PASSWORD" \
-  "REDIS_CONNECTION=$REDIS_CONNECTION" \
   "POSTGRES_CATALOG_PASSWORD=$POSTGRES_CATALOG_PASSWORD" \
   "CATALOG_DB_CONNECTION=$CATALOG_DB_CONNECTION" \
   "POSTGRES_PAYMENTS_PASSWORD=$POSTGRES_PAYMENTS_PASSWORD" \
@@ -96,12 +94,9 @@ case "$SA_PASSWORD$RABBIT_PASSWORD$ADMIN_PASSWORD$REDIS_PASSWORD$POSTGRES_CATALO
   *ChangeMe*) echo "aviso: ainda há valores 'ChangeMe...' no $ENV_FILE — confira se são propositais." >&2 ;;
 esac
 
-# A senha pura usada pelo servidor (--requirepass) tem de bater com a embutida na
-# connection string do consumidor; senão o consumidor não autentica no Redis.
-case "$REDIS_CONNECTION" in
-  *"password=$REDIS_PASSWORD"*) ;;
-  *) echo "aviso: REDIS_CONNECTION não embute a mesma senha de REDIS_PASSWORD no $ENV_FILE — devem casar." >&2 ;;
-esac
+# O Redis nao precisa de aviso de casamento: a mesma REDIS_PASSWORD alimenta o
+# --requirepass do servidor e o Redis__Password do consumidor, os dois derivados
+# daqui. Nao ha segunda copia da senha para divergir.
 
 # Mesma regra para o Postgres do catalog: a senha do servidor (POSTGRES_PASSWORD)
 # tem de bater com a embutida na connection string do catalog.
@@ -236,6 +231,7 @@ stringData:
   ConnectionStrings__Catalog: '$(sq "$CATALOG_DB_CONNECTION")'
   RabbitMq__Username: '$(sq "$RABBIT_USER")'
   RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
+  Redis__Password: '$(sq "$REDIS_PASSWORD")'
 EOF
 
 cat > "$PAYMENTS_SECRET" <<EOF

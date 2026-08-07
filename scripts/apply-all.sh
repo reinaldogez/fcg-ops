@@ -61,6 +61,11 @@ kubectl wait --for=condition=ready pod -l app=rabbitmq          -n "$NS" --timeo
 kubectl wait --for=condition=ready pod -l app=redis             -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=postgres-catalog  -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=postgres-payments -n "$NS" --timeout="$TIMEOUT"
+# O emulador do read model precisa estar atendendo antes do catalog subir: a tabela e
+# criada no boot do servico, que tolera o endpoint fora do ar sem derrubar. Sem esta
+# espera o catalog sobe, nao cria a tabela, e o sintoma so aparece na primeira leitura
+# da biblioteca.
+kubectl wait --for=condition=ready pod -l app=dynamodb-local    -n "$NS" --timeout="$TIMEOUT"
 
 echo "==> 02-observability"
 apply_dir "$K8S/02-observability"
