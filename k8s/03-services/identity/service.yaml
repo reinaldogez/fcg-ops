@@ -4,8 +4,12 @@ metadata:
   name: identity-api
   namespace: fcg
 spec:
+  # NodePort com a porta declarada explicitamente: a borda da nuvem aponta para um
+  # numero fixo, e o alocado ao acaso mudaria a cada recriacao do Service.
+  type: NodePort
   selector:
     app: identity-api
   ports:
     - port: 80
       targetPort: 8080
+      nodePort: 30081

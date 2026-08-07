@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-env
+  namespace: fcg
+data:
+  # Valores que MUDAM entre o cluster local e o da nuvem. O configmap.yaml ao lado
+  # guarda so o que e identico nos dois; o que varia mora aqui, gerado a partir do
+  # .env por scripts/init-secrets.sh e nunca versionado.
+  # Local: rabbitmq / 5672 / false. Nuvem: endpoint do broker gerenciado / 5671 / true.
+  RabbitMq__Host: "REPLACE_ME"
+  RabbitMq__Port: "REPLACE_ME"
+  RabbitMq__UseSsl: "REPLACE_ME"

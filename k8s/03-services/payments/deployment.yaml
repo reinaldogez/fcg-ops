@@ -28,6 +28,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: payments-config
+            - configMapRef:
+                name: payments-env
             - secretRef:
                 name: payments-secret
           livenessProbe:
