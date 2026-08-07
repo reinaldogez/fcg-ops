@@ -19,3 +19,6 @@ docker-compose.override.yml
 # Kubernetes Secrets reais (copiados do .example, preenchidos fora do git)
 secret.yaml
 secret-jwt.yaml
+
+# Relatorio da varredura de segredos (contem os trechos casados)
+gitleaks-report.json
