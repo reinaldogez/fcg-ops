@@ -101,7 +101,6 @@ POSTGRES_CATALOG_SECRET="k8s/01-infra/postgres-catalog/secret.yaml"
 POSTGRES_PAYMENTS_SECRET="k8s/01-infra/postgres-payments/secret.yaml"
 IDENTITY_SECRET="k8s/03-services/identity/secret.yaml"
 JWT_SECRET="k8s/03-services/identity/secret-jwt.yaml"
-NOTIFICATIONS_SECRET="k8s/03-services/notifications/secret.yaml"
 CATALOG_SECRET="k8s/03-services/catalog/secret.yaml"
 PAYMENTS_SECRET="k8s/03-services/payments/secret.yaml"
 
@@ -191,19 +190,6 @@ EOF
   echo "  Jwt__KeyId: '$(sq "$KEY_ID")'"
 } > "$JWT_SECRET"
 
-cat > "$NOTIFICATIONS_SECRET" <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: notifications-secret
-  namespace: fcg
-type: Opaque
-stringData:
-  Redis__Connection: '$(sq "$REDIS_CONNECTION")'
-  RabbitMq__Username: '$(sq "$RABBIT_USER")'
-  RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
-EOF
-
 cat > "$CATALOG_SECRET" <<EOF
 apiVersion: v1
 kind: Secret
@@ -238,7 +224,6 @@ echo "  $POSTGRES_CATALOG_SECRET"
 echo "  $POSTGRES_PAYMENTS_SECRET"
 echo "  $IDENTITY_SECRET"
 echo "  $JWT_SECRET"
-echo "  $NOTIFICATIONS_SECRET"
 echo "  $CATALOG_SECRET"
 echo "  $PAYMENTS_SECRET"
 echo "próximo passo: bash scripts/apply-all.sh"

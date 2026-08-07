@@ -19,7 +19,6 @@ REQUIRED_SECRETS=(
   "$K8S/01-infra/postgres-payments/secret.yaml"
   "$K8S/03-services/identity/secret.yaml"
   "$K8S/03-services/identity/secret-jwt.yaml"
-  "$K8S/03-services/notifications/secret.yaml"
   "$K8S/03-services/catalog/secret.yaml"
   "$K8S/03-services/payments/secret.yaml"
 )
@@ -81,13 +80,6 @@ echo "    aguardando migration+seed concluir..."
 kubectl wait --for=condition=complete job/catalog-migrate -n "$NS" --timeout="$TIMEOUT"
 kubectl apply -f "$CT/deployment.yaml"
 kubectl apply -f "$CT/service.yaml"
-
-echo "==> 03-services/notifications"
-NT="$K8S/03-services/notifications"
-kubectl apply -f "$NT/configmap.yaml"
-kubectl apply -f "$NT/secret.yaml"
-kubectl apply -f "$NT/deployment.yaml"
-kubectl apply -f "$NT/service.yaml"
 
 echo "==> 03-services/payments (Job de migration antes do Deployment)"
 PY="$K8S/03-services/payments"
