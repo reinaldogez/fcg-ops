@@ -173,29 +173,6 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       Loki__Url: http://loki:3100
 
-  # ---------- orquestracao do notifications ----------
-  # Worker de notificacoes: consumer-only (MassTransit em background); o HTTP expoe so
-  # /health/live e /health/ready (Redis) — sem REST de negocio.
-  notifications-api:
-    build:
-      context: ../fcg-notifications
-      secrets: [gh_token]
-    image: ghcr.io/reinaldogez/fcg-notifications:latest
-    ports:
-      - "8082:8080"   # diagnostico de health no host (8081 e do identity); nao e REST de negocio
-    depends_on:
-      redis:    { condition: service_healthy }
-      rabbitmq: { condition: service_healthy }
-    environment:
-      ASPNETCORE_ENVIRONMENT: Production
-      ASPNETCORE_HTTP_PORTS: "8080"
-      Redis__Connection: ${REDIS_CONNECTION}
-      RabbitMq__Host: rabbitmq
-      RabbitMq__Username: ${RABBITMQ_USER}
-      RabbitMq__Password: ${RABBITMQ_PASSWORD}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-      Loki__Url: http://loki:3100
-
   # ---------- orquestracao do catalog ----------
   # One-shot: aplica as migrations e semeia o catalogo de jogos (seed idempotente),
   # encerrando sem subir host. So precisa do Postgres; nao toca broker nem auth.
