@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamodb-local
+  namespace: fcg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamodb-local
+  template:
+    metadata:
+      labels:
+        app: dynamodb-local
+    spec:
+      containers:
+        - name: dynamodb-local
+          image: amazon/dynamodb-local:2.5.2
+          # Execucao em memoria: nao ha volume nem reivindicacao de armazenamento de
+          # proposito — os dados sao reconstruiveis a partir do relacional, e a
+          # reconstrucao e justamente o que se demonstra apagando este pod.
+          # Tambem nao ha Secret: a credencial aceita pelo emulador e falsa e ja esta
+          # embutida no cliente que o consome.
+          args: ["-jar", "DynamoDBLocal.jar", "-inMemory"]
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5

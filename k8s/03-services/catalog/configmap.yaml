@@ -15,3 +15,10 @@ data:
   Jwt__RequireHttpsMetadata: "false"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
   Loki__Url: "http://loki:3100"
+  # Read model da biblioteca. O nome da tabela e a regiao sao os mesmos no cluster
+  # local e no da nuvem, entao ficam aqui e nao no ConfigMap gerado — o endereco do
+  # servico, esse sim, varia por ambiente e vive no catalog-env.
+  # A regiao e declarada em vez de resolvida pelo servico de metadados da instancia:
+  # nao vale empilhar mais uma dependencia num caminho que ja e fragil.
+  DynamoDb__TableName: "fcg-biblioteca"
+  AWS_REGION: "us-east-1"
