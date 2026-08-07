@@ -10,6 +10,17 @@ NS="fcg"
 K8S="k8s"
 TIMEOUT="600s"   # generoso: o SQL Server demora a aceitar conexões.
 
+# Perfil de ambiente: decide o que de 01-infra sobe e o que se espera ficar pronto.
+# Validado antes de qualquer apply — perfil errado precisa falhar sem ter mexido no cluster.
+FCG_PERFIL="${FCG_PERFIL:-k3d}"
+case "$FCG_PERFIL" in
+  k3d|ec2) ;;
+  *)
+    echo "erro: FCG_PERFIL inválido: '$FCG_PERFIL' (use 'k3d' ou 'ec2')" >&2
+    exit 1
+    ;;
+esac
+
 # --- pré-condição: os arquivos gerados precisam existir (não são versionados) ---
 # Secrets (credenciais) e ConfigMaps de ambiente (valor que varia entre k3d e nuvem):
 # ambos saem do init-secrets.sh a partir do .env.
@@ -53,19 +64,32 @@ apply_dir() {
 echo "==> namespace"
 kubectl apply -f "$K8S/00-namespace.yaml"
 
-echo "==> 01-infra"
-apply_dir "$K8S/01-infra"
+echo "==> 01-infra (perfil: $FCG_PERFIL)"
+# Bancos, Redis e observabilidade sobem igual nos dois perfis. O broker e o emulador do
+# read model so existem no cluster local: na nuvem os dois sao servico gerenciado, e um
+# broker local de pe ali seria um destino alternativo silencioso — configuracao errada
+# conectaria nele e tudo pareceria funcionar, contra um broker vazio. A ausencia protege.
+INFRA_DIRS=(sqlserver-identity postgres-catalog postgres-payments redis)
+if [[ "$FCG_PERFIL" == "k3d" ]]; then
+  INFRA_DIRS+=(rabbitmq dynamodb-local)
+fi
+for d in "${INFRA_DIRS[@]}"; do
+  apply_dir "$K8S/01-infra/$d"
+done
+
 echo "    aguardando infra ficar Ready..."
 kubectl wait --for=condition=ready pod -l app=sqlserver-identity -n "$NS" --timeout="$TIMEOUT"
-kubectl wait --for=condition=ready pod -l app=rabbitmq          -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=redis             -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=postgres-catalog  -n "$NS" --timeout="$TIMEOUT"
 kubectl wait --for=condition=ready pod -l app=postgres-payments -n "$NS" --timeout="$TIMEOUT"
-# O emulador do read model precisa estar atendendo antes do catalog subir: a tabela e
-# criada no boot do servico, que tolera o endpoint fora do ar sem derrubar. Sem esta
-# espera o catalog sobe, nao cria a tabela, e o sintoma so aparece na primeira leitura
-# da biblioteca.
-kubectl wait --for=condition=ready pod -l app=dynamodb-local    -n "$NS" --timeout="$TIMEOUT"
+if [[ "$FCG_PERFIL" == "k3d" ]]; then
+  kubectl wait --for=condition=ready pod -l app=rabbitmq          -n "$NS" --timeout="$TIMEOUT"
+  # O emulador do read model precisa estar atendendo antes do catalog subir: a tabela e
+  # criada no boot do servico, que tolera o endpoint fora do ar sem derrubar. Sem esta
+  # espera o catalog sobe, nao cria a tabela, e o sintoma so aparece na primeira leitura
+  # da biblioteca.
+  kubectl wait --for=condition=ready pod -l app=dynamodb-local    -n "$NS" --timeout="$TIMEOUT"
+fi
 
 echo "==> 02-observability"
 apply_dir "$K8S/02-observability"
