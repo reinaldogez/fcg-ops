@@ -10,8 +10,10 @@ NS="fcg"
 K8S="k8s"
 TIMEOUT="600s"   # generoso: o SQL Server demora a aceitar conexões.
 
-# --- pré-condição: os Secrets reais precisam existir (não são versionados) ---
-REQUIRED_SECRETS=(
+# --- pré-condição: os arquivos gerados precisam existir (não são versionados) ---
+# Secrets (credenciais) e ConfigMaps de ambiente (valor que varia entre k3d e nuvem):
+# ambos saem do init-secrets.sh a partir do .env.
+REQUIRED_GENERATED=(
   "$K8S/01-infra/sqlserver-identity/secret.yaml"
   "$K8S/01-infra/rabbitmq/secret.yaml"
   "$K8S/01-infra/redis/secret.yaml"
@@ -21,11 +23,14 @@ REQUIRED_SECRETS=(
   "$K8S/03-services/identity/secret-jwt.yaml"
   "$K8S/03-services/catalog/secret.yaml"
   "$K8S/03-services/payments/secret.yaml"
+  "$K8S/03-services/identity/configmap-env.yaml"
+  "$K8S/03-services/catalog/configmap-env.yaml"
+  "$K8S/03-services/payments/configmap-env.yaml"
 )
 missing=0
-for f in "${REQUIRED_SECRETS[@]}"; do
+for f in "${REQUIRED_GENERATED[@]}"; do
   if [[ ! -f "$f" ]]; then
-    echo "erro: Secret real ausente: $f" >&2
+    echo "erro: arquivo gerado ausente: $f" >&2
     missing=1
   fi
 done
@@ -33,8 +38,8 @@ if [[ "$missing" -ne 0 ]]; then
   echo "" >&2
   echo "como resolver:" >&2
   echo "  1) preencha os valores reais no .env (cp .env.example .env, depois edite);" >&2
-  echo "  2) materialize os Secrets com 'bash scripts/init-secrets.sh' (gera a chave RSA e os secret.yaml)." >&2
-  echo "  alternativa manual: copie cada secret.example.yaml para secret.yaml e preencha à mão." >&2
+  echo "  2) materialize os arquivos com 'bash scripts/init-secrets.sh' (gera a chave RSA, os secret.yaml e os configmap-env.yaml)." >&2
+  echo "  alternativa manual: copie cada *.example.yaml para o nome sem '.example' e preencha à mão." >&2
   exit 1
 fi
 
@@ -63,6 +68,7 @@ apply_dir "$K8S/02-observability"
 echo "==> 03-services/identity (Job de migration antes do Deployment)"
 ID="$K8S/03-services/identity"
 kubectl apply -f "$ID/configmap.yaml"
+kubectl apply -f "$ID/configmap-env.yaml"
 kubectl apply -f "$ID/secret.yaml"
 kubectl apply -f "$ID/secret-jwt.yaml"
 kubectl apply -f "$ID/migrate-job.yaml"
@@ -74,6 +80,7 @@ kubectl apply -f "$ID/service.yaml"
 echo "==> 03-services/catalog (Job de migration+seed antes do Deployment)"
 CT="$K8S/03-services/catalog"
 kubectl apply -f "$CT/configmap.yaml"
+kubectl apply -f "$CT/configmap-env.yaml"
 kubectl apply -f "$CT/secret.yaml"
 kubectl apply -f "$CT/migrate-job.yaml"
 echo "    aguardando migration+seed concluir..."
@@ -84,6 +91,7 @@ kubectl apply -f "$CT/service.yaml"
 echo "==> 03-services/payments (Job de migration antes do Deployment)"
 PY="$K8S/03-services/payments"
 kubectl apply -f "$PY/configmap.yaml"
+kubectl apply -f "$PY/configmap-env.yaml"
 kubectl apply -f "$PY/secret.yaml"
 kubectl apply -f "$PY/migrate-job.yaml"
 echo "    aguardando migration concluir..."

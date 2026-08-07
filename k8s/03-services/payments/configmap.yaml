@@ -6,8 +6,6 @@ metadata:
 data:
   ASPNETCORE_ENVIRONMENT: "Production"
   ASPNETCORE_HTTP_PORTS: "8080"
-  RabbitMq__Host: "rabbitmq"
-  RabbitMq__Port: "5672"
   # Gateway de pagamento simulado: preco <= threshold aprova, > threshold rejeita
   # (deterministico). A demo controla o desfecho pelo preco do jogo.
   Payment__RejectionThreshold: "5000"

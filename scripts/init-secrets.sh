@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Materializa os Secrets reais do cluster a partir de UMA fonte única (.env não-versionado)
-# e da chave RSA da demo. Deriva os valores compartilhados (senha do SA, credenciais do
-# Rabbit) de um lugar só, evitando inconsistência entre arquivos.
+# Materializa, a partir de UMA fonte única (.env não-versionado) e da chave RSA da demo:
+# os Secrets reais do cluster e os ConfigMaps de ambiente (configmap-env.yaml), que
+# carregam o que varia entre k3d e a nuvem sem ser credencial. Deriva os valores
+# compartilhados (senha do SA, credenciais do Rabbit) de um lugar só, evitando
+# inconsistência entre arquivos.
 #
-# Os arquivos gerados (secret.yaml / secret-jwt.yaml) e o .env NUNCA são versionados.
+# Os arquivos gerados (secret.yaml / secret-jwt.yaml / configmap-env.yaml) e o .env
+# NUNCA são versionados.
 # Este script NÃO inventa valores: lê o que você preencheu no .env. Idempotente — reexecutar
 # regenera os arquivos a partir do .env atual (a chave RSA existente é reaproveitada).
 
@@ -21,9 +24,11 @@ fi
 
 # Lê uma chave do .env de forma literal (sem expandir $ nem quebrar em ';'/espaços),
 # pegando tudo após o primeiro '=' e removendo um eventual CR de fim de linha (CRLF).
+# Chave ausente devolve string vazia e sucesso: sob 'set -e' o grep sem casamento
+# derrubaria o script aqui, antes da checagem que nomeia a variável faltante.
 get_env() {
   local key="$1"
-  grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | head -n1 | sed -E "s/^[[:space:]]*${key}=//" | sed 's/\r$//'
+  grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | head -n1 | sed -E "s/^[[:space:]]*${key}=//" | sed 's/\r$//' || true
 }
 
 SA_PASSWORD="$(get_env SQLSERVER_SA_PASSWORD)"
@@ -38,7 +43,18 @@ CATALOG_DB_CONNECTION="$(get_env CATALOG_DB_CONNECTION)"
 POSTGRES_PAYMENTS_PASSWORD="$(get_env POSTGRES_PAYMENTS_PASSWORD)"
 PAYMENTS_DB_CONNECTION="$(get_env PAYMENTS_DB_CONNECTION)"
 
-# Pré-condição: nenhuma var obrigatória pode estar vazia.
+# Valores que variam entre k3d e a nuvem. Nao sao credencial, entao vao para ConfigMap
+# gerado (nao-versionado) em vez de Secret — o ConfigMap versionado so guarda o que e
+# identico nos dois ambientes.
+RABBITMQ_HOST="$(get_env RABBITMQ_HOST)"
+RABBITMQ_PORT="$(get_env RABBITMQ_PORT)"
+RABBITMQ_USE_SSL="$(get_env RABBITMQ_USE_SSL)"
+JWT_ISSUER="$(get_env JWT_ISSUER)"
+JWT_PUBLIC_BASE_URL="$(get_env JWT_PUBLIC_BASE_URL)"
+DYNAMODB_SERVICE_URL="$(get_env DYNAMODB_SERVICE_URL)"
+
+# Pré-condição: nenhuma var obrigatória pode estar vazia. As duas que podem ser vazias
+# por natureza são cobradas logo abaixo, por outra regra.
 missing=0
 for pair in \
   "SQLSERVER_SA_PASSWORD=$SA_PASSWORD" \
@@ -51,9 +67,25 @@ for pair in \
   "POSTGRES_CATALOG_PASSWORD=$POSTGRES_CATALOG_PASSWORD" \
   "CATALOG_DB_CONNECTION=$CATALOG_DB_CONNECTION" \
   "POSTGRES_PAYMENTS_PASSWORD=$POSTGRES_PAYMENTS_PASSWORD" \
-  "PAYMENTS_DB_CONNECTION=$PAYMENTS_DB_CONNECTION"; do
+  "PAYMENTS_DB_CONNECTION=$PAYMENTS_DB_CONNECTION" \
+  "RABBITMQ_HOST=$RABBITMQ_HOST" \
+  "RABBITMQ_PORT=$RABBITMQ_PORT" \
+  "RABBITMQ_USE_SSL=$RABBITMQ_USE_SSL" \
+  "JWT_ISSUER=$JWT_ISSUER"; do
   if [[ -z "${pair#*=}" ]]; then
     echo "erro: variável obrigatória vazia ou ausente no $ENV_FILE: ${pair%%=*}" >&2
+    missing=1
+  fi
+done
+
+# Duas variaveis sao legitimamente vazias em um dos ambientes — JWT_PUBLIC_BASE_URL em
+# k3d, DYNAMODB_SERVICE_URL na nuvem. Para elas a exigencia e a chave estar declarada no
+# arquivo, nao ter valor: assim o ambiente que nao a usa passa, mas um nome digitado
+# errado ainda falha em vez de virar string vazia em silencio.
+for key in JWT_PUBLIC_BASE_URL DYNAMODB_SERVICE_URL; do
+  if ! grep -qE "^[[:space:]]*${key}=" "$ENV_FILE"; then
+    echo "erro: variável obrigatória vazia ou ausente no $ENV_FILE: $key" >&2
+    echo "      ela pode ficar vazia, mas precisa estar declarada." >&2
     missing=1
   fi
 done
@@ -103,6 +135,9 @@ IDENTITY_SECRET="k8s/03-services/identity/secret.yaml"
 JWT_SECRET="k8s/03-services/identity/secret-jwt.yaml"
 CATALOG_SECRET="k8s/03-services/catalog/secret.yaml"
 PAYMENTS_SECRET="k8s/03-services/payments/secret.yaml"
+IDENTITY_ENV="k8s/03-services/identity/configmap-env.yaml"
+CATALOG_ENV="k8s/03-services/catalog/configmap-env.yaml"
+PAYMENTS_ENV="k8s/03-services/payments/configmap-env.yaml"
 
 cat > "$SQL_SECRET" <<EOF
 apiVersion: v1
@@ -216,6 +251,46 @@ stringData:
   RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
 EOF
 
+cat > "$IDENTITY_ENV" <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: identity-env
+  namespace: fcg
+data:
+  RabbitMq__Host: '$(sq "$RABBITMQ_HOST")'
+  RabbitMq__Port: '$(sq "$RABBITMQ_PORT")'
+  RabbitMq__UseSsl: '$(sq "$RABBITMQ_USE_SSL")'
+  Jwt__Issuer: '$(sq "$JWT_ISSUER")'
+  Jwt__PublicBaseUrl: '$(sq "$JWT_PUBLIC_BASE_URL")'
+EOF
+
+cat > "$CATALOG_ENV" <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog-env
+  namespace: fcg
+data:
+  RabbitMq__Host: '$(sq "$RABBITMQ_HOST")'
+  RabbitMq__Port: '$(sq "$RABBITMQ_PORT")'
+  RabbitMq__UseSsl: '$(sq "$RABBITMQ_USE_SSL")'
+  Jwt__Issuer: '$(sq "$JWT_ISSUER")'
+  DynamoDb__ServiceUrl: '$(sq "$DYNAMODB_SERVICE_URL")'
+EOF
+
+cat > "$PAYMENTS_ENV" <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payments-env
+  namespace: fcg
+data:
+  RabbitMq__Host: '$(sq "$RABBITMQ_HOST")'
+  RabbitMq__Port: '$(sq "$RABBITMQ_PORT")'
+  RabbitMq__UseSsl: '$(sq "$RABBITMQ_USE_SSL")'
+EOF
+
 echo "ok: Secrets reais materializados a partir de '$ENV_FILE' (fora do git):"
 echo "  $SQL_SECRET"
 echo "  $RABBIT_SECRET"
@@ -226,4 +301,8 @@ echo "  $IDENTITY_SECRET"
 echo "  $JWT_SECRET"
 echo "  $CATALOG_SECRET"
 echo "  $PAYMENTS_SECRET"
+echo "ok: ConfigMaps de ambiente materializados (fora do git):"
+echo "  $IDENTITY_ENV"
+echo "  $CATALOG_ENV"
+echo "  $PAYMENTS_ENV"
 echo "próximo passo: bash scripts/apply-all.sh"

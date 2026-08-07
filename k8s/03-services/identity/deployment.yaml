@@ -28,6 +28,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: identity-config
+            - configMapRef:
+                name: identity-env
             - secretRef:
                 name: identity-secret
             - secretRef:

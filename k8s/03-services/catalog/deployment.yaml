@@ -28,6 +28,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: catalog-config
+            - configMapRef:
+                name: catalog-env
             - secretRef:
                 name: catalog-secret
           livenessProbe:
