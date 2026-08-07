@@ -22,3 +22,13 @@ secret-jwt.yaml
 
 # Relatorio da varredura de segredos (contem os trechos casados)
 gitleaks-report.json
+
+# Terraform: diretorio de trabalho, estado (contem valor sensivel em texto plano)
+# e variaveis reais. O *.tfvars.example continua versionado.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# ConfigMaps gerados por script (valor que varia por ambiente)
+configmap-env.yaml
