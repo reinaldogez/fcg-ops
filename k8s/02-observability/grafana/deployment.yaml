@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: grafana
-          image: grafana/grafana:latest
+          image: grafana/grafana:13.0.2
           env:
             - name: GF_SECURITY_ADMIN_USER
               value: admin
@@ -26,13 +26,17 @@ spec:
               containerPort: 3000
           volumeMounts:
             - name: datasources
-              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
-              subPath: datasources.yaml
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
             - name: data
               mountPath: /var/lib/grafana
       volumes:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
         - name: data
           emptyDir: {}

@@ -1,0 +1,10 @@
+# Provider de dashboards provisionados no boot do Grafana — le os .json do proprio
+# diretorio onde este arquivo mora; o Grafana ignora este .yaml na hora de listar dashboards.
+
+apiVersion: 1
+
+providers:
+  - name: fcg
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards

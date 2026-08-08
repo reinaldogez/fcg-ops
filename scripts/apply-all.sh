@@ -92,6 +92,14 @@ if [[ "$FCG_PERFIL" == "k3d" ]]; then
 fi
 
 echo "==> 02-observability"
+# Datasources e dashboards do Grafana nao sao YAML versionado: sao gerados a partir dos
+# mesmos diretorios-fonte que o Compose monta, para nao manter duas copias divergentes.
+kubectl create configmap grafana-datasources \
+  --from-file=observability/grafana/provisioning/datasources/ \
+  -n "$NS" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create configmap grafana-dashboards \
+  --from-file=observability/grafana/provisioning/dashboards/ \
+  -n "$NS" --dry-run=client -o yaml | kubectl apply -f -
 apply_dir "$K8S/02-observability"
 
 echo "==> 03-services/identity (Job de migration antes do Deployment)"
