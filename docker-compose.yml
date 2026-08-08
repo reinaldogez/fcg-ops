@@ -119,7 +119,7 @@ services:
 
   # UI de observabilidade; datasources Loki/Tempo/Prometheus provisionados no boot.
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.0.2
     ports:
       - "3000:3000"   # UI exposta localmente
     volumes:
