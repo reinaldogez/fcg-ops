@@ -2,3 +2,12 @@ aws_region = "us-east-1"
 
 name_prefix     = "fcg-"
 broker_username = "fcg"
+
+# endereco do autor em notacao CIDR; /32 e um host unico. o valor abaixo vem do
+# bloco reservado a documentacao pela RFC 5737 e nao e roteavel.
+admin_cidr = "203.0.113.10/32"
+
+# conteudo da chave publica gerada fora do Terraform; a privada fica so na
+# maquina do autor. o exemplo esta truncado de proposito: copiado cru, ele falha
+# no registro do par de chaves em vez de registrar material invalido.
+chave_publica_ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... autor@maquina"

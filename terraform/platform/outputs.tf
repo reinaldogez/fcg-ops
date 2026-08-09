@@ -19,3 +19,13 @@ output "instance_profile_name" {
   description = "Nome do perfil de instância que carrega as permissões do cluster."
   value       = aws_iam_instance_profile.instancia.name
 }
+
+output "instance_public_ip" {
+  description = "Endereço fixo do nó do cluster. É por ele que passam o acesso administrativo e os túneis da sessão."
+  value       = aws_eip.cluster.public_ip
+}
+
+output "instance_id" {
+  description = "Identificador da instância do cluster, alvo da parada e da partida de cada sessão."
+  value       = aws_instance.cluster.id
+}
