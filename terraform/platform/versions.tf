@@ -6,6 +6,12 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 6.0"
     }
+
+    # gera a senha do broker; a senha vive no estado, que e local e nao versionado.
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.0"
+    }
   }
 
   # sem bloco backend: o estado fica local e fora do versionamento. o root de
