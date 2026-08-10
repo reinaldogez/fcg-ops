@@ -1,1 +1,8 @@
 aws_region = "us-east-1"
+
+# tem que coincidir com o valor do root permanente: e por este prefixo que as
+# consultas acham a VPC, a sub-rede e o segredo. divergencia aqui aparece como
+# recurso nao encontrado, e nao como prefixo errado.
+name_prefix = "fcg-"
+
+broker_engine_version = "3.13"
