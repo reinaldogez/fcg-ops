@@ -30,5 +30,12 @@ gitleaks-report.json
 *.tfstate.*
 *.tfvars
 
+# Plano salvo: resolve os valores do estado, entao um plano gerado com a infra de
+# pe carrega a senha do broker em claro. O padrao de extensao vale em qualquer
+# lugar de proposito -- plano salvo fora da pasta e o erro que a regra precisa pegar.
+terraform/plans/*
+!terraform/plans/.gitkeep
+*.tfplan
+
 # ConfigMaps gerados por script (valor que varia por ambiente)
 configmap-env.yaml
