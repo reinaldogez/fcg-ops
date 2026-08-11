@@ -90,14 +90,22 @@ resource "aws_apigatewayv2_api" "fcg" {
 # nomeado empurraria o discovery para um caminho prefixado enquanto o iss do token
 # continuaria sem prefixo.
 #
-# A criacao do authorizer valida apenas o formato do issuer, nunca o endpoint de
-# discovery: com o discovery quebrado o apply passa e a falha aparece so na
-# primeira requisicao real.
+# A criacao do authorizer chama o /.well-known/openid-configuration deste issuer
+# e falha com 400 se ele nao responder. Como quem serve esse documento e o
+# identity atras da rota aberta, a plataforma nasce em duas fases: ver a variavel
+# authorizer_ligado.
 locals {
   api_issuer = "https://${aws_apigatewayv2_api.fcg.id}.execute-api.${var.aws_region}.amazonaws.com"
 }
 
+# A primeira fase do bootstrap nao cria authorizer nenhum. Nao ha depends_on para
+# a rota de discovery: o grafo do Terraform e granular por recurso, e nao por
+# elemento, entao qualquer aresta daqui de volta para as rotas fecha ciclo com as
+# protegidas, que referenciam este recurso. Quem ordena as duas coisas e a
+# sequencia das duas aplicacoes, nao o grafo.
 resource "aws_apigatewayv2_authorizer" "jwt" {
+  count = var.authorizer_ligado ? 1 : 0
+
   api_id           = aws_apigatewayv2_api.fcg.id
   name             = "${var.name_prefix}jwt"
   authorizer_type  = "JWT"
@@ -175,15 +183,19 @@ locals {
   }
 }
 
+# O filtro deixa passar toda rota aberta sempre, e as protegidas so quando ha
+# authorizer para elas apontarem. Na primeira fase sobram as tres abertas -- entre
+# elas a do discovery, que e justamente o que precisa responder para a segunda
+# fase poder criar o authorizer.
 resource "aws_apigatewayv2_route" "fcg" {
-  for_each = local.rotas
+  for_each = { for k, v in local.rotas : k => v if !v.autorizada || var.authorizer_ligado }
 
   api_id    = aws_apigatewayv2_api.fcg.id
   route_key = each.key
   target    = "integrations/${local.integracoes[each.value.integracao]}"
 
   authorization_type = each.value.autorizada ? "JWT" : "NONE"
-  authorizer_id      = each.value.autorizada ? aws_apigatewayv2_authorizer.jwt.id : null
+  authorizer_id      = each.value.autorizada ? aws_apigatewayv2_authorizer.jwt[0].id : null
 }
 
 resource "aws_cloudwatch_log_group" "acesso_gateway" {
