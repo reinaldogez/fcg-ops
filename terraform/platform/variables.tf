@@ -30,3 +30,9 @@ variable "chave_publica_ssh" {
   description = "Conteúdo da chave pública gerada fora do Terraform. Só o material público entra aqui — o privado nunca chega ao estado."
   type        = string
 }
+
+variable "authorizer_ligado" {
+  description = "Interruptor de bootstrap da autenticação de borda. Falso apenas na primeira aplicação de uma conta nova, enquanto o discovery ainda não responde; o padrão verdadeiro é o estado estável, e é o que dispensa lembrar de religar a autenticação depois."
+  type        = bool
+  default     = true
+}
