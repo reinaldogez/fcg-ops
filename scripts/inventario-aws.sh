@@ -14,6 +14,19 @@ set -euo pipefail
 # 2 quando falta peca do permanente. Sao dois codigos porque as duas falhas pedem acoes
 # opostas -- uma manda destruir, a outra manda aplicar.
 
+# Sob MSYS (o bash que acompanha o Git para Windows), argumento que comeca por '/' e
+# reescrito para caminho do Windows antes de chegar ao executavel. O prefixo do grupo de log
+# comeca por '/', entao a chamada chega deformada e a API recusa. A variavel desliga a
+# conversao para este processo e os filhos; fora do MSYS ela nao tem efeito nenhum, entao
+# fica no topo em vez de virar instrucao para quem roda -- instrucao se esquece, e o sintoma
+# e o inventario dizer que falta um recurso que esta la.
+export MSYS2_ARG_CONV_EXCL='*'
+
+# Consulta que falha aborta por sinal (ver 'aws_'), e o sinal vira o codigo 2 -- o mesmo de
+# peca faltando, porque a acao que ele pede e a mesma: olhar antes de dar a sessao por
+# fechada. O trap existe para o sinal nao virar codigo 143 nem imprimir 'Terminated'.
+trap 'exit 2' TERM
+
 REGIAO="${AWS_REGION:-us-east-1}"
 PREFIXO="${NAME_PREFIX:-fcg-}"
 NAMESPACE="${NAMESPACE_DESCOBERTA:-fcg.local}"
@@ -28,8 +41,27 @@ done
 
 # A regiao viaja explicita em toda chamada em vez de depender do ambiente: um inventario
 # que consultasse a regiao errada sairia zero com a conta inteira ligada do outro lado.
+#
+# A chamada que falha aborta o inventario com a mensagem do proprio 'aws'. Achar nada e
+# resposta valida e sai zero com saida vazia; nao conseguir perguntar nao e -- e as duas
+# coisas eram indistinguiveis enquanto o erro ia para /dev/null e o codigo de saida era
+# descartado. O efeito era o relatorio anunciar ausencia de recurso existente, que manda
+# aplicar o que ja esta aplicado.
+# O 'kill' no lugar de 'exit' nao e estilo: a consulta roda dentro de '$(...)', e ali 'exit'
+# encerraria so a subshell -- o '|| true' da consulta engoliria o codigo e o inventario
+# seguiria ate o fim, imprimindo ausencia para o permanente e, pior, 'inexistente' para as
+# linhas proibidas, que e a leitura que manda encerrar a sessao com o broker cobrando.
 aws_() {
-  aws --region "$REGIAO" "$@"
+  local saida
+  if ! saida="$(aws --region "$REGIAO" "$@" 2>&1)"; then
+    {
+      echo "erro: consulta à AWS falhou (região ${REGIAO}); inventário abortado."
+      echo "  aws $*"
+      printf '%s\n' "$saida" | sed 's/^/  /'
+    } >&2
+    kill -TERM $$
+  fi
+  printf '%s' "$saida"
 }
 
 # ---------------------------------------------------------------------------
@@ -38,9 +70,9 @@ aws_() {
 # Cada funcao imprime uma linha por recurso encontrado, e nada quando nao encontra. O laco
 # de verificacao so conta linhas: quem sabe qual chamada faz o que e a tabela, nao o laco.
 #
-# Toda consulta termina em '|| true'. Sob 'set -e' a chamada que nao acha nada -- ou que
-# falha por permissao -- derrubaria o script no meio do inventario, e o relatorio sairia
-# pela metade parecendo sucesso parcial.
+# Toda consulta termina em '|| true', e ele protege o 'grep -v', nao a chamada: o grep sai 1
+# quando nao sobra linha, e sob 'set -e' uma ausencia legitima derrubaria o script. Falha da
+# chamada e caso diferente e nao passa por aqui -- morre no 'aws_', com a mensagem da API.
 # ---------------------------------------------------------------------------
 
 # A instancia e casada por etiqueta de nome e filtrada pelo estado esperado na propria
@@ -51,7 +83,7 @@ q_instancia_parada() {
     --filters "Name=tag:Name,Values=${PREFIXO}cluster" \
     "Name=instance-state-name,Values=stopped" \
     --query 'Reservations[].Instances[].InstanceId' \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # O que interessa no endereco fixo e estar associado: um endereco alocado e solto cobra por
@@ -60,13 +92,13 @@ q_ip_fixo_associado() {
   aws_ ec2 describe-addresses \
     --filters "Name=tag:Name,Values=${PREFIXO}ip-fixo" \
     --query 'Addresses[?AssociationId!=null].AllocationId' \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 q_api() {
   aws_ apigatewayv2 get-apis \
     --query "Items[?Name=='${PREFIXO}api'].ApiId" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # O authorizer pende da API, entao a consulta so faz sentido depois de resolver o
@@ -80,19 +112,19 @@ q_authorizer() {
   aws_ apigatewayv2 get-authorizers \
     --api-id "$api_id" \
     --query "Items[?Name=='${PREFIXO}jwt'].AuthorizerId" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 q_vpc_link() {
   aws_ apigatewayv2 get-vpc-links \
     --query "Items[?Name=='${PREFIXO}vpc-link'].VpcLinkId" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 q_namespace() {
   aws_ servicediscovery list-namespaces \
     --query "Namespaces[?Name=='${NAMESPACE}'].Id" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # Os dois servicos de descoberta: 'users' e 'catalog'. Pagamentos nao tem registro aqui, do
@@ -105,7 +137,7 @@ q_servicos_descoberta() {
   aws_ servicediscovery list-services \
     --filters "Name=NAMESPACE_ID,Values=${ns_id},Condition=EQ" \
     --query "Services[?Name=='users' || Name=='catalog'].Id" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # Camada separada da anterior de proposito: o registro no Cloud Map sao dois recursos por
@@ -118,20 +150,20 @@ q_registros_descoberta() {
     aws_ servicediscovery list-instances \
       --service-id "$svc_id" \
       --query 'Instances[].Id' \
-      --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+      --output text | tr '\t' '\n' | grep -v '^$' || true
   done
 }
 
 q_tabela_read_model() {
   aws_ dynamodb list-tables \
     --query "TableNames[?@=='${PREFIXO}biblioteca']" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 q_segredo_broker() {
   aws_ secretsmanager list-secrets \
     --query "SecretList[?Name=='${PREFIXO}broker-credencial'].ARN" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # A retencao entra na consulta, e nao numa checagem a parte: grupo de log sem validade
@@ -141,7 +173,7 @@ q_log_gateway() {
   aws_ logs describe-log-groups \
     --log-group-name-prefix "/aws/apigateway/${PREFIXO}api" \
     --query "logGroups[?retentionInDays==\`${RETENCAO_ESPERADA}\`].logGroupName" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # ---------------------------------------------------------------------------
@@ -157,13 +189,13 @@ q_log_gateway() {
 q_broker() {
   aws_ mq list-brokers \
     --query "BrokerSummaries[?starts_with(BrokerName, '${PREFIXO}')].BrokerId" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 q_funcao() {
   aws_ lambda list-functions \
     --query "Functions[?starts_with(FunctionName, '${PREFIXO}')].FunctionName" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # O mapeamento pende da funcao: sem funcao nao ha mapeamento, e a linha sai limpa. Com
@@ -174,7 +206,7 @@ q_mapeamento_origem() {
     aws_ lambda list-event-source-mappings \
       --function-name "$fn" \
       --query 'EventSourceMappings[].UUID' \
-      --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+      --output text | tr '\t' '\n' | grep -v '^$' || true
   done
 }
 
@@ -183,7 +215,7 @@ q_mapeamento_origem() {
 q_tabela_idempotencia() {
   aws_ dynamodb list-tables \
     --query "TableNames[?starts_with(@, '${PREFIXO}') && @!='${PREFIXO}biblioteca']" \
-    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true
+    --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
 # ---------------------------------------------------------------------------
