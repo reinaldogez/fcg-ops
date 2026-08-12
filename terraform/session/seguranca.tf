@@ -53,3 +53,49 @@ resource "aws_vpc_security_group_ingress_rule" "gerenciamento" {
   from_port                    = 443
   to_port                      = 443
 }
+
+# saida, e ela nao e opcional: o servico de integracao cria as interfaces do
+# mapeamento DENTRO deste grupo, e elas precisam originar conexao para os endpoints
+# de interface. grupo declarado por recurso nasce sem a saida irrestrita que o
+# console adiciona por padrao, entao sem esta regra o mapeamento fica habilitado e
+# nao consome -- medido nesta sessao, com os endpoints ja disponiveis.
+#
+# o destino e o grupo dos endpoints, e nao a internet: a saida que se abre e
+# exatamente a que alcanca os tres servicos trazidos para dentro da VPC.
+resource "aws_vpc_security_group_egress_rule" "saida_para_endpoints" {
+  security_group_id = aws_security_group.broker.id
+  description       = "Saida para os endpoints de interface, usada pelas interfaces do mapeamento."
+
+  referenced_security_group_id = aws_security_group.endpoints.id
+  ip_protocol                  = "tcp"
+  from_port                    = 443
+  to_port                      = 443
+}
+
+# as interfaces do mapeamento consomem o broker de dentro deste mesmo grupo, e
+# trafego entre membros do mesmo grupo NAO e liberado implicitamente: precisa de par
+# de regras que referencie o proprio grupo. sem elas o mapeamento reporta origem
+# inalcancavel com o broker em estado ativo -- medido nesta sessao, e o sintoma nao
+# distingue "broker fora do ar" de "regra ausente".
+#
+# a instancia continua autorizada pelas regras acima; estas cobrem so o consumo pelo
+# mapeamento, que e um caminho interno ao grupo.
+resource "aws_vpc_security_group_ingress_rule" "transporte_do_mapeamento" {
+  security_group_id = aws_security_group.broker.id
+  description       = "Porta de transporte, a partir do proprio grupo: e nele que o mapeamento cria suas interfaces."
+
+  referenced_security_group_id = aws_security_group.broker.id
+  ip_protocol                  = "tcp"
+  from_port                    = 5671
+  to_port                      = 5671
+}
+
+resource "aws_vpc_security_group_egress_rule" "saida_para_o_broker" {
+  security_group_id = aws_security_group.broker.id
+  description       = "Saida na porta de transporte, usada pelas interfaces do mapeamento para alcancar o broker."
+
+  referenced_security_group_id = aws_security_group.broker.id
+  ip_protocol                  = "tcp"
+  from_port                    = 5671
+  to_port                      = 5671
+}
