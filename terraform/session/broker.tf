@@ -56,9 +56,16 @@ resource "aws_mq_broker" "sessao" {
   publicly_accessible = false
   subnet_ids          = data.aws_subnets.broker.ids
 
-  # sem grupo de seguranca, e a ausencia e decisao: o motor RabbitMQ do servico
-  # gerenciado nao aceita o argumento -- medido em spike, nesta conta. a protecao
-  # aqui e a sub-rede sem entrada da internet somada a credencial forte.
+  # com grupo de seguranca proprio, declarado no seguranca.tf deste root. broker
+  # privado single-instance exige pelo menos um grupo, e omitir o argumento nao
+  # deixa o broker sem postura: faz a plataforma escolher o grupo default da VPC,
+  # que autoriza entrada apenas a partir de si mesmo. como a instancia esta em
+  # outro grupo, o default recusaria justamente quem precisa publicar.
+  #
+  # o argumento e opcional e nao e calculado no esquema do provedor, entao a
+  # escolha feita pela plataforma nunca voltaria para o estado: a omissao seria
+  # invisivel no plano e no estado, e apareceria so como conexao recusada.
+  security_groups = [aws_security_group.broker.id]
   #
   # sem bloco de registros: o grupo de log nao pertence a este recurso e sobrevive
   # a destruicao dele, entao acumularia um por sessao e o gate de inventario, que
