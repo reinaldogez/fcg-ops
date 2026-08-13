@@ -69,6 +69,21 @@ services:
       timeout: 3s
       retries: 10
 
+  # Emulador do read model da biblioteca. Execucao em memoria, sem volume: os dados sao
+  # reconstruiveis a partir do relacional. A credencial aceita e falsa e ja esta embutida
+  # no cliente que o consome, entao nao ha secret. A tabela e criada pelo catalog no boot,
+  # por isso o healthcheck existe — o catalog espera este servico ficar saudavel.
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.2
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory"]
+    healthcheck:
+      # a imagem nao tem curl nem nc; a checagem TCP e feita pelo /dev/tcp do bash
+      # (o /bin/sh da imagem e bash), equivalente ao tcpSocket do manifesto k8s.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8000 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ---------- broker de mensageria ----------
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -201,6 +216,8 @@ services:
     depends_on:
       postgres-catalog: { condition: service_healthy }
       rabbitmq:         { condition: service_healthy }
+      redis:            { condition: service_healthy }
+      dynamodb-local:   { condition: service_healthy }
       catalog-migrate:  { condition: service_completed_successfully }
     environment:
       ASPNETCORE_ENVIRONMENT: Production
@@ -208,8 +225,18 @@ services:
       ConnectionStrings__Catalog: ${CATALOG_DB_CONNECTION}
       RabbitMq__Host: rabbitmq
       RabbitMq__Port: "5672"
+      RabbitMq__UseSsl: "false"   # rede interna do compose sem TLS
       RabbitMq__Username: ${RABBITMQ_USER}
       RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      # read model da biblioteca: emulador local na rede interna; nome e regiao iguais
+      # aos do cluster k8s (catalog-config), o endereco aponta o servico do compose.
+      DynamoDb__TableName: fcg-biblioteca
+      DynamoDb__ServiceUrl: http://dynamodb-local:8000
+      AWS_REGION: us-east-1
+      # cache-aside do catalog: o servico redis ja existe; host e porta iguais aos do k8s.
+      Redis__Host: redis
+      Redis__Port: "6379"
+      Redis__Password: ${REDIS_PASSWORD}
       Jwt__JwksUri: http://identity-api:8080/.well-known/jwks.json
       Jwt__RequireHttpsMetadata: "false"   # JWKS por http na rede interna do compose
       Jwt__Issuer: fcg-identity
