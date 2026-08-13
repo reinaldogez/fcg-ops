@@ -23,6 +23,11 @@ em Compose e em Kubernetes.
 
 ### Fluxo de negócio
 
+> **Estado da Fase 2**, mantido aqui como marco de evolução do sistema. Retrata os quatro
+> serviços em coreografia quando o `notifications` ainda era um serviço in-cluster. Na Fase 3
+> ele foi descontinuado e sucedido por uma função serverless em repositório próprio, fora do
+> Compose e do k3d; a topologia corrente é redesenhada no próprio README quando a Fase 3 fecha.
+
 ```mermaid
 flowchart LR
   client([cliente / curl]) -->|POST /api/usuarios| api[identity-api]
@@ -236,12 +241,11 @@ Ambos são ignorados pelo git, como o `.env`. Um `ENV_FILE` explícito continua 
 precedência sobre o perfil, e quem já tem um `.env` antigo segue funcionando: na ausência do
 arquivo do perfil, o script recua para ele.
 
-O `init-secrets.sh` lê esse arquivo, gera (ou reaproveita) a chave RSA e escreve os dez Secrets
+O `init-secrets.sh` lê esse arquivo, gera (ou reaproveita) a chave RSA e escreve os nove Secrets
 reais — `sqlserver-identity/secret.yaml`, `rabbitmq/secret.yaml`, `redis/secret.yaml`,
 `postgres-catalog/secret.yaml`, `postgres-payments/secret.yaml`, `identity/secret.yaml`,
-`identity/secret-jwt.yaml` (com o PEM como block scalar), `notifications/secret.yaml`,
-`catalog/secret.yaml` e `payments/secret.yaml`. Esses arquivos `secret.yaml` **não são
-versionados**.
+`identity/secret-jwt.yaml` (com o PEM como block scalar), `catalog/secret.yaml` e
+`payments/secret.yaml`. Esses arquivos `secret.yaml` **não são versionados**.
 
 <details>
 <summary>Alternativa manual (sem o script)</summary>
@@ -256,7 +260,6 @@ cp k8s/01-infra/postgres-catalog/secret.example.yaml  k8s/01-infra/postgres-cata
 cp k8s/01-infra/postgres-payments/secret.example.yaml k8s/01-infra/postgres-payments/secret.yaml
 cp k8s/03-services/identity/secret.example.yaml       k8s/03-services/identity/secret.yaml
 cp k8s/03-services/identity/secret-jwt.example.yaml   k8s/03-services/identity/secret-jwt.yaml
-cp k8s/03-services/notifications/secret.example.yaml  k8s/03-services/notifications/secret.yaml
 cp k8s/03-services/catalog/secret.example.yaml        k8s/03-services/catalog/secret.yaml
 cp k8s/03-services/payments/secret.example.yaml       k8s/03-services/payments/secret.yaml
 # edite cada secret.yaml e substitua os PLACEHOLDER pelos valores reais;
@@ -302,7 +305,7 @@ kubectl apply -f ./k8s/ -R
 O `-R` (`--recursive`) percorre as subpastas; o prefixo numérico de topo (`00-`, `01-`, …) faz a
 ordem alfabética coincidir com a ordem de dependência. Mesmo que algum recurso seja aplicado
 antes da sua dependência, o cluster **converge**: cada pod traz um `initContainer`
-(`wait-for-db` / `wait-for-rabbit`) que o segura até a dependência responder. Para um boot
+(`wait-for-db`) que o segura até a dependência de banco responder. Para um boot
 **limpo e ordenado** (sem reinícios transitórios), prefira o `apply-all.sh`. Os `*.example.yaml`
 **não** devem ser aplicados por este comando — use o `apply-all.sh`, que já os ignora.
 
@@ -314,16 +317,15 @@ Todos os Services são `ClusterIP`; o acesso pelo navegador/curl é via `kubectl
 kubectl port-forward svc/grafana       3000:3000   -n fcg   # http://localhost:3000
 kubectl port-forward svc/rabbitmq      15672:15672 -n fcg   # http://localhost:15672
 kubectl port-forward svc/identity-api  8081:80     -n fcg   # http://localhost:8081
-kubectl port-forward svc/notifications-api 8082:80 -n fcg   # http://localhost:8082/health/ready
 kubectl port-forward svc/catalog-api   8083:80     -n fcg   # http://localhost:8083 (REST: /api/jogos, /api/pedidos — requer token do identity)
 kubectl port-forward svc/payments-api  8084:80     -n fcg   # http://localhost:8084/health/ready (consumer-only, health apenas)
 ```
 
 Com o identity exposto, o mesmo `curl` da seção de Compose vale (`POST /api/usuarios`). O
-`notifications-api` e o `payments-api` são **consumer-only** (sem REST de negócio): seus
-port-forwards servem só para o diagnóstico de health (`/health/live`, `/health/ready`) — a
-lógica roda nos consumers em background; o efeito do cadastro e das compras aparece é no log
-dos pods e nos sinais do Grafana. O `catalog-api` é o oposto: tem REST de negócio
+`payments-api` é **consumer-only** (sem REST de negócio): seu port-forward serve só para o
+diagnóstico de health (`/health/live`, `/health/ready`) — a lógica roda no consumer em
+background; o efeito das compras aparece é no log dos pods e nos sinais do Grafana. O
+`catalog-api` é o oposto: tem REST de negócio
 (`/api/jogos`, `/api/pedidos`, `/api/biblioteca`) e exige nos endpoints protegidos um token
 emitido pelo identity (login em `POST /api/auth/login` no `:8081`).
 
