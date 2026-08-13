@@ -7,8 +7,12 @@ obj/
 *.user
 *.suo
 
-# Local environment (real values never committed)
+# Local environment (real values never committed). O sufixo e o perfil: .env.k3d e
+# .env.ec2 carregam senha real igual ao .env, entao a regra cobre a familia inteira.
+# A negacao preserva o template, que e o unico do conjunto que fica versionado.
 .env
+.env.*
+!.env.example
 
 # Local compose overrides
 docker-compose.override.yml

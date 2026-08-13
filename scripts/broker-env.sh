@@ -10,7 +10,20 @@ set -euo pipefail
 # A senha nunca é impressa. O broker é procurado pelo NOME, que é estável entre sessões —
 # o identificador muda a cada criação e não serve de chave de descoberta.
 
-ENV_FILE="${ENV_FILE:-.env}"
+# Perfil de ambiente, o mesmo seletor do apply-all.sh e do init-secrets.sh. Aqui o recuo
+# padrao e 'ec2': este script so roda na instancia, contra o broker gerenciado. Escrever o
+# host do broker no arquivo do perfil errado nao da erro nenhum — o valor simplesmente nao
+# alcanca o cluster, e o sintoma aparece longe da causa.
+FCG_PERFIL="${FCG_PERFIL:-ec2}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+  if [[ -f ".env.$FCG_PERFIL" ]]; then
+    ENV_FILE=".env.$FCG_PERFIL"
+  else
+    ENV_FILE=".env"
+  fi
+fi
+echo "perfil: $FCG_PERFIL — escrevendo em '$ENV_FILE'"
+
 BROKER_NAME="${BROKER_NAME:-fcg-broker}"
 SECRET_NAME="${SECRET_NAME:-fcg-broker-credencial}"
 
@@ -23,7 +36,7 @@ done
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "erro: '$ENV_FILE' não encontrado." >&2
-  echo "      copie o template e preencha os valores reais: cp .env.example .env" >&2
+  echo "      copie o template e preencha os valores reais: cp .env.example $ENV_FILE" >&2
   exit 1
 fi
 

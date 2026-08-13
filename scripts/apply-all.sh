@@ -48,7 +48,7 @@ done
 if [[ "$missing" -ne 0 ]]; then
   echo "" >&2
   echo "como resolver:" >&2
-  echo "  1) preencha os valores reais no .env (cp .env.example .env, depois edite);" >&2
+  echo "  1) preencha os valores reais no arquivo do perfil (cp .env.example .env.$FCG_PERFIL, depois edite);" >&2
   echo "  2) materialize os arquivos com 'bash scripts/init-secrets.sh' (gera a chave RSA, os secret.yaml e os configmap-env.yaml)." >&2
   echo "  alternativa manual: copie cada *.example.yaml para o nome sem '.example' e preencha à mão." >&2
   exit 1

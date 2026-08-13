@@ -12,13 +12,27 @@ set -euo pipefail
 # Este script NÃO inventa valores: lê o que você preencheu no .env. Idempotente — reexecutar
 # regenera os arquivos a partir do .env atual (a chave RSA existente é reaproveitada).
 
-ENV_FILE="${ENV_FILE:-.env}"
+# Perfil de ambiente, o mesmo seletor que o apply-all.sh usa. Cada perfil tem seu proprio
+# arquivo de valores (.env.k3d, .env.ec2), porque host, porta e TLS do broker diferem entre
+# eles: alternar editando um arquivo unico deixa o disco num estado meio a meio, com chave
+# de um ambiente e chave de outro. ENV_FILE explicito continua vencendo, e quem tem so o
+# .env antigo segue funcionando pelo recuo.
+FCG_PERFIL="${FCG_PERFIL:-k3d}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+  if [[ -f ".env.$FCG_PERFIL" ]]; then
+    ENV_FILE=".env.$FCG_PERFIL"
+  else
+    ENV_FILE=".env"
+  fi
+fi
+echo "perfil: $FCG_PERFIL — lendo valores de '$ENV_FILE'"
+
 PEM="${PEM:-identity-rsa-private.pem}"
 KEY_ID="fcg-identity-key-1"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "erro: '$ENV_FILE' não encontrado." >&2
-  echo "      copie o template e preencha os valores reais: cp .env.example .env" >&2
+  echo "      copie o template e preencha os valores reais: cp .env.example $ENV_FILE" >&2
   exit 1
 fi
 

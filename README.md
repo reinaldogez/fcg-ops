@@ -214,14 +214,29 @@ aponta para ele.
 
 Os manifestos de Secret versionados (`secret.example.yaml`) carregam **apenas placeholders**. O
 valor real precisa ser materializado fora do git, uma vez. O caminho recomendado deriva tudo de
-uma fonte única (`.env`):
+uma fonte única — o arquivo do perfil de ambiente:
 
 ```bash
-cp .env.example .env        # preencha os valores reais
+cp .env.example .env.k3d    # preencha os valores reais
 bash scripts/init-secrets.sh
 ```
 
-O `init-secrets.sh` lê o `.env`, gera (ou reaproveita) a chave RSA e escreve os dez Secrets
+O perfil vem de `FCG_PERFIL` (padrão `k3d`; o outro valor é `ec2`), o mesmo seletor que o
+`apply-all.sh` usa para decidir o que sobe de `01-infra`. Cada perfil tem seu arquivo —
+`.env.k3d` e `.env.ec2` —, porque host, porta e TLS do broker diferem entre eles: no cluster
+local o RabbitMQ atende `5672` em texto claro, e na nuvem o broker gerenciado atende `5671`
+com TLS. Manter um arquivo só obriga a editar essas chaves a cada troca de ambiente, e o
+esquecimento não dá erro de configuração — dá conexão que falha longe da causa. Para a nuvem:
+
+```bash
+FCG_PERFIL=ec2 bash scripts/init-secrets.sh
+```
+
+Ambos são ignorados pelo git, como o `.env`. Um `ENV_FILE` explícito continua tendo
+precedência sobre o perfil, e quem já tem um `.env` antigo segue funcionando: na ausência do
+arquivo do perfil, o script recua para ele.
+
+O `init-secrets.sh` lê esse arquivo, gera (ou reaproveita) a chave RSA e escreve os dez Secrets
 reais — `sqlserver-identity/secret.yaml`, `rabbitmq/secret.yaml`, `redis/secret.yaml`,
 `postgres-catalog/secret.yaml`, `postgres-payments/secret.yaml`, `identity/secret.yaml`,
 `identity/secret-jwt.yaml` (com o PEM como block scalar), `notifications/secret.yaml`,
@@ -356,11 +371,11 @@ não precisa de identidade de rede estável nem de volume persistente — o cont
 fcg-ops/
 ├── docker-compose.yml                     # stack local completa (infra + observabilidade + identity + notifications + catalog + payments)
 ├── docker-compose.override.example.yml    # template do override de chave RSA (placeholder)
-├── .env.example                           # template das variáveis (placeholders)
+├── .env.example                           # template das variáveis (placeholders); copie para .env.k3d / .env.ec2
 ├── scripts/
 │   ├── gen-rsa-key.sh                      # gera o par de chaves RSA
 │   ├── bootstrap-k3d.sh                    # cria o cluster k3d 'fcg'
-│   ├── init-secrets.sh                     # materializa os Secrets reais a partir do .env
+│   ├── init-secrets.sh                     # materializa os Secrets reais a partir do arquivo do perfil
 │   └── apply-all.sh                        # aplica os manifestos em ordem de boot
 ├── observability/                          # configs canônicas (Loki, Tempo, Prometheus, Grafana, OTel)
 └── k8s/
