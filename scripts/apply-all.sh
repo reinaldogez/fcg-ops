@@ -100,6 +100,10 @@ kubectl create configmap grafana-datasources \
 kubectl create configmap grafana-dashboards \
   --from-file=observability/grafana/provisioning/dashboards/ \
   -n "$NS" --dry-run=client -o yaml | kubectl apply -f -
+# O apply_dir usa find | xargs, sem ordem garantida: o Deployment do Grafana consome as
+# credenciais via envFrom, entao o Secret precisa existir antes. Aplica-se explicitamente
+# aqui, como os servicos fazem com secret.yaml antes do deployment.yaml.
+kubectl apply -f "$K8S/02-observability/grafana/secret.yaml"
 apply_dir "$K8S/02-observability"
 
 echo "==> 03-services/identity (Job de migration antes do Deployment)"
