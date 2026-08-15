@@ -55,6 +55,8 @@ POSTGRES_CATALOG_PASSWORD="$(get_env POSTGRES_CATALOG_PASSWORD)"
 CATALOG_DB_CONNECTION="$(get_env CATALOG_DB_CONNECTION)"
 POSTGRES_PAYMENTS_PASSWORD="$(get_env POSTGRES_PAYMENTS_PASSWORD)"
 PAYMENTS_DB_CONNECTION="$(get_env PAYMENTS_DB_CONNECTION)"
+GRAFANA_ADMIN_USER="$(get_env GRAFANA_ADMIN_USER)"
+GRAFANA_ADMIN_PASSWORD="$(get_env GRAFANA_ADMIN_PASSWORD)"
 
 # Valores que variam entre k3d e a nuvem. Nao sao credencial, entao vao para ConfigMap
 # gerado (nao-versionado) em vez de Secret — o ConfigMap versionado so guarda o que e
@@ -80,6 +82,8 @@ for pair in \
   "CATALOG_DB_CONNECTION=$CATALOG_DB_CONNECTION" \
   "POSTGRES_PAYMENTS_PASSWORD=$POSTGRES_PAYMENTS_PASSWORD" \
   "PAYMENTS_DB_CONNECTION=$PAYMENTS_DB_CONNECTION" \
+  "GRAFANA_ADMIN_USER=$GRAFANA_ADMIN_USER" \
+  "GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD" \
   "RABBITMQ_HOST=$RABBITMQ_HOST" \
   "RABBITMQ_PORT=$RABBITMQ_PORT" \
   "RABBITMQ_USE_SSL=$RABBITMQ_USE_SSL" \
@@ -144,6 +148,7 @@ IDENTITY_SECRET="k8s/03-services/identity/secret.yaml"
 JWT_SECRET="k8s/03-services/identity/secret-jwt.yaml"
 CATALOG_SECRET="k8s/03-services/catalog/secret.yaml"
 PAYMENTS_SECRET="k8s/03-services/payments/secret.yaml"
+GRAFANA_SECRET="k8s/02-observability/grafana/secret.yaml"
 IDENTITY_ENV="k8s/03-services/identity/configmap-env.yaml"
 CATALOG_ENV="k8s/03-services/catalog/configmap-env.yaml"
 PAYMENTS_ENV="k8s/03-services/payments/configmap-env.yaml"
@@ -261,6 +266,18 @@ stringData:
   RabbitMq__Password: '$(sq "$RABBIT_PASSWORD")'
 EOF
 
+cat > "$GRAFANA_SECRET" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-secret
+  namespace: fcg
+type: Opaque
+stringData:
+  GF_SECURITY_ADMIN_USER: '$(sq "$GRAFANA_ADMIN_USER")'
+  GF_SECURITY_ADMIN_PASSWORD: '$(sq "$GRAFANA_ADMIN_PASSWORD")'
+EOF
+
 cat > "$IDENTITY_ENV" <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -311,6 +328,7 @@ echo "  $IDENTITY_SECRET"
 echo "  $JWT_SECRET"
 echo "  $CATALOG_SECRET"
 echo "  $PAYMENTS_SECRET"
+echo "  $GRAFANA_SECRET"
 echo "ok: ConfigMaps de ambiente materializados (fora do git):"
 echo "  $IDENTITY_ENV"
 echo "  $CATALOG_ENV"
