@@ -1,0 +1,38 @@
+[project]
+name = "fcg-e2e"
+version = "1.0.0"
+description = "Testes ponta a ponta da plataforma FCG pela borda publica"
+requires-python = ">=3.11"
+dependencies = [
+    "pytest>=8.0",
+    "requests>=2.32",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+include = ["fcg*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/F: pyflakes e pycodestyle. I: ordenacao de import. UP: sintaxe moderna.
+# B: bugbear. SIM: simplificacoes. ANN: anotacao de tipo obrigatoria.
+# BLE: captura larga de excecao, que aqui so se admite com justificativa escrita.
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "BLE", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# fixture do pytest recebe outras fixtures por nome: anotar o retorno basta.
+"conftest.py" = ["ANN401"]
+
+[tool.pytest.ini_options]
+testpaths = ["borda"]
+# -ra mostra o resumo de tudo que nao passou; --strict-markers barra marcador
+# escrito errado, que de outro modo viraria teste silenciosamente ignorado.
+addopts = "-ra --strict-markers"
+markers = [
+    "saga: exercita a saga de compra ponta a ponta, com espera assincrona",
+]

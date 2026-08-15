@@ -43,3 +43,12 @@ terraform/plans/*
 
 # ConfigMaps gerados por script (valor que varia por ambiente)
 configmap-env.yaml
+
+# Artefatos da suite de testes: ambiente virtual, bytecode e caches de
+# ferramenta. Todos sao regenerados a partir dos arquivos versionados.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
