@@ -27,6 +27,23 @@ if [[ -z "${ENV_FILE:-}" ]]; then
 fi
 echo "perfil: $FCG_PERFIL — lendo valores de '$ENV_FILE'"
 
+# Guarda contra a divergencia silenciosa entre este script e o broker-env.sh. Os dois tem
+# padroes de perfil opostos — 'k3d' aqui, 'ec2' la, cada um pelo ambiente em que roda — e
+# os dois recuam para .env quando o arquivo do perfil nao existe. Enquanto o recuo vale
+# para ambos, eles operam no mesmo arquivo e tudo funciona. Mas se existir o arquivo de um
+# perfil e nao o do outro, um passa a ler .env.<perfil> enquanto o outro segue no .env: o
+# host do broker seria escrito num arquivo e lido de outro, sem erro nenhum, e o sintoma
+# apareceria como servico que nao conecta, longe da causa.
+if [[ "$ENV_FILE" == ".env" ]]; then
+  for outro in k3d ec2; do
+    if [[ -f ".env.$outro" ]]; then
+      echo "aviso: lendo '$ENV_FILE' (recuo), mas '.env.$outro' existe no disco." >&2
+      echo "       o broker-env.sh usa o perfil 'ec2' por padrao e escreve no arquivo dele;" >&2
+      echo "       confira se os dois scripts estao lendo e escrevendo no mesmo arquivo." >&2
+    fi
+  done
+fi
+
 PEM="${PEM:-identity-rsa-private.pem}"
 KEY_ID="fcg-identity-key-1"
 
