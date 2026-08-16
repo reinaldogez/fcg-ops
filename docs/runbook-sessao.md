@@ -179,7 +179,9 @@ As duas consultas, não só a primeira. Um Job de migration `Failed` herdado de 
 faz uma reaplicação futura esperar **dez minutos em silêncio**, dentro da janela paga, sem
 que a mensagem diga que está esperando Job.
 
-O esperado na nuvem é **quinze pods** `Running` e **três Jobs** `Complete`:
+O esperado na nuvem é **doze pods** `Running` e **três Jobs** `Complete`. O `get pods` mostra
+quinze linhas: as três a mais são os pods dos Jobs, que ficam `Completed` e não contam como
+`Running`.
 
 | | |
 |---|---|
@@ -192,6 +194,17 @@ O esperado na nuvem é **quinze pods** `Running` e **três Jobs** `Complete`:
 serviço gerenciado e o read model é a tabela real — os dois só existem como pod no perfil local,
 onde o emulador faz o papel deles. Quem conhece o ambiente local conta os pods aqui e conclui
 que faltam dois; não faltam.
+
+**Inspecionar cedo demais engana.** Nos primeiros minutos depois do boot os três serviços
+aparecem `0/1 Running` — ou mesmo `Unknown`, enquanto o nó reassume os pods —, porque as probes
+ainda não fecharam. Não é defeito: é o cluster voltando. Em vez de contar na hora, espere a
+convergência:
+
+```bash
+kubectl wait --for=condition=ready pod -l app=identity-api -n fcg --timeout=180s
+kubectl wait --for=condition=ready pod -l app=catalog-api  -n fcg --timeout=120s
+kubectl wait --for=condition=ready pod -l app=payments-api -n fcg --timeout=120s
+```
 
 Tudo `Running` e os Jobs `Complete` → siga. Cluster vazio ou serviços faltando → o
 procedimento é o de [levantar-do-zero.md](levantar-do-zero.md#a-camada-de-workloads).
