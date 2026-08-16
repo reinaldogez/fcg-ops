@@ -7,9 +7,13 @@ já existe: este documento **não** a levanta do zero — para conta virgem, vej
 O que fica de pé entre sessões custa ~US$5,60/mês. O que se liga por sessão custa por hora, e
 o fechamento existe para que ele não sobreviva à noite.
 
+Salvo indicação em contrário, os comandos rodam **na raiz do repositório**, no laptop. Os que
+rodam na instância estão marcados como tal.
+
 ## Sumário
 
 - [Os dois perfis](#os-dois-perfis)
+- [As coordenadas da plataforma](#as-coordenadas-da-plataforma)
 - [Antes de iniciar a instância](#antes-de-iniciar-a-instância)
 - [Abertura](#abertura)
 - [Sessão verde](#sessão-verde)
@@ -35,6 +39,24 @@ o fechamento existe para que ele não sobreviva à noite.
 **Na dúvida, Borda.** Subir o broker depois custa doze minutos; esquecê-lo ligado custa a
 noite. O perfil Borda cobre tudo que não é mensageria: autenticação, rotas protegidas,
 discovery, catálogo, read model, cache e dashboard.
+
+---
+
+## As coordenadas da plataforma
+
+Os comandos deste documento usam `<...>` para valores que a conta resolve. Descubra-os uma
+vez, no começo da sessão, e mantenha-os à mão.
+
+| Placeholder | Como descobrir |
+|---|---|
+| `<id-instância>` | `aws ec2 describe-instances --filters "Name=tag:Name,Values=fcg-*" --query "Reservations[].Instances[].InstanceId" --output text` |
+| `<endereço-fixo>` | a mesma consulta, trocando `InstanceId` por `PublicIpAddress` |
+| `<id-broker>` | sai do apply da abertura como `broker_name`; ou `aws mq list-brokers --query "BrokerSummaries[?starts_with(BrokerName,'fcg')].BrokerId" --output text` |
+| `<api>` | `aws apigatewayv2 get-apis --query "Items[?starts_with(Name,'fcg')].ApiId" --output text` |
+| `<região>` | `us-east-1` |
+
+O identificador da instância e o endereço fixo **não mudam entre sessões** — o endereço é
+associado e sobrevive à parada. O do broker muda a cada sessão, porque o broker é recriado.
 
 ---
 
@@ -97,14 +119,22 @@ terraform -chdir=terraform/session apply
 Sempre com `-chdir`. Aplicar no root errado sai `exit 0` com `No changes` e broker nenhum
 criado — ver [comando que passa por não ter feito nada](#comando-que-passa-por-não-ter-feito-nada).
 
+O plano tem de sair **`13 to add, 0 to change, 0 to destroy`** — o broker, seu grupo de
+segurança, as regras e os endpoints de interface. Número diferente merece leitura antes de
+confirmar. Se o root nunca foi inicializado nesta máquina, rode
+`terraform -chdir=terraform/session init` antes. **Nenhum `-var` é necessário:** o padrão já é
+o estado correto.
+
+O broker leva ~12 minutos para ficar disponível — medido em 12m12s.
+
 Anote os dois outputs (`broker_name` e `broker_endpoint`) e **siga para o passo 2 sem
 esperar**. A senha não sai por output nenhum: ela vive no gerenciador de segredos.
 
 ### 2. Iniciar a instância
 
 ```bash
-aws ec2 start-instances --instance-ids <id>
-aws ec2 wait instance-running --instance-ids <id>
+aws ec2 start-instances --instance-ids <id-instância>
+aws ec2 wait instance-running --instance-ids <id-instância>
 ssh ec2-user@<endereço-fixo>
 ```
 
@@ -147,7 +177,7 @@ procedimento é o de [levantar-do-zero.md](levantar-do-zero.md#a-camada-de-workl
 ### 5. Confirmar o broker disponível (só perfil Saga)
 
 ```bash
-aws mq describe-broker --broker-id <id> --query 'BrokerState'
+aws mq describe-broker --broker-id <id-broker> --query 'BrokerState'
 ```
 
 Espere `RUNNING`. A versão do motor sobe de patch na janela de manutenção — a versão menor é
@@ -289,13 +319,14 @@ o broker, e destruir o broker antes deixa mapeamento órfão.
 terraform -chdir=terraform/session destroy
 ```
 
-Leva ~19 minutos — o grupo de segurança espera as interfaces de rede sumirem.
+Leva ~13 minutos e sai `13 destroyed`, casando com o `13 to add` da abertura. O tempo é
+dominado pelos endpoints de interface, não pelo broker.
 
 **3. Parar a instância — nunca terminar:**
 
 ```bash
-aws ec2 stop-instances --instance-ids <id>
-aws ec2 wait instance-stopped --instance-ids <id>
+aws ec2 stop-instances --instance-ids <id-instância>
+aws ec2 wait instance-stopped --instance-ids <id-instância>
 ```
 
 O volume guarda o cluster, as imagens e as variáveis. Terminar joga tudo isso fora e a
