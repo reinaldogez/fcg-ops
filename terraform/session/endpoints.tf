@@ -52,6 +52,26 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_https" {
   to_port                      = 443
 }
 
+# a instancia tambem precisa chegar aqui, e a razao e efeito colateral do nome privado
+# do endpoint: ele faz a VPC inteira resolver o nome publico do gerenciador de segredos
+# para o endereco privado do endpoint, e nao so as interfaces do mapeamento.
+# a instancia, que lia o segredo pela internet sem problema nenhum, passou a cair neste
+# grupo -- e sem esta regra ela e barrada. o sintoma e tempo de conexao esgotado no
+# broker-env.sh com o resto da saida da instancia saudavel, o que esconde a causa: o
+# procedimento de abertura de sessao quebra, e nada no plano ou no estado indica por que.
+#
+# a origem e o grupo do no do cluster, encontrado pelo mesmo dado que o grupo do broker
+# usa: o acoplamento entre os dois roots continua sendo a etiqueta de nome.
+resource "aws_vpc_security_group_ingress_rule" "endpoints_da_instancia" {
+  security_group_id = aws_security_group.endpoints.id
+  description       = "Chegada em 443 a partir do grupo do no do cluster, que le o segredo do broker."
+
+  referenced_security_group_id = data.aws_security_group.instancia.id
+  ip_protocol                  = "tcp"
+  from_port                    = 443
+  to_port                      = 443
+}
+
 # um endpoint por servico, todos na sub-rede do broker: e nela que o mapeamento cria
 # as interfaces, e endpoint em outra sub-rede nao seria alcancado. a sub-rede vem da
 # mesma consulta que o broker usa, entao as duas coisas nao podem divergir.
