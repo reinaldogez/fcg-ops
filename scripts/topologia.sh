@@ -14,7 +14,20 @@ set -euo pipefail
 # As credenciais vêm do .env, preenchido pelo broker-env.sh. A senha só entra na
 # autenticação do curl: nenhuma linha daqui a imprime.
 
-ENV_FILE="${ENV_FILE:-.env}"
+# Perfil de ambiente, o mesmo seletor do broker-env.sh, e com o mesmo padrao 'ec2': os dois
+# formam um par e rodam na instancia, contra o broker gerenciado. Sem este recuo, o
+# broker-env.sh escreveria o endereco em .env.<perfil> e este script leria .env — a
+# topologia iria para o broker de outra sessao, ou nao seria criada. ENV_FILE explicito
+# continua vencendo, e quem tem so o .env nao percebe diferenca.
+FCG_PERFIL="${FCG_PERFIL:-ec2}"
+if [[ -z "${ENV_FILE:-}" ]]; then
+  if [[ -f ".env.$FCG_PERFIL" ]]; then
+    ENV_FILE=".env.$FCG_PERFIL"
+  else
+    ENV_FILE=".env"
+  fi
+fi
+echo "perfil: $FCG_PERFIL — lendo valores de '$ENV_FILE'"
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "erro: 'curl' não encontrado no PATH. Instale-o e tente de novo." >&2
@@ -23,7 +36,7 @@ fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "erro: '$ENV_FILE' não encontrado." >&2
-  echo "      copie o template e preencha os valores reais: cp .env.example .env" >&2
+  echo "      copie o template e preencha os valores reais: cp .env.example $ENV_FILE" >&2
   exit 1
 fi
 
