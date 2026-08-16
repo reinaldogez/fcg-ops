@@ -243,7 +243,9 @@ kubectl apply -f k8s/03-services/identity/configmap-env.yaml \
               -f k8s/03-services/catalog/configmap-env.yaml \
               -f k8s/03-services/catalog/secret.yaml \
               -f k8s/03-services/payments/configmap-env.yaml \
-              -f k8s/03-services/payments/secret.yaml
+              -f k8s/03-services/payments/secret.yaml \
+              -f k8s/02-observability/grafana/secret.yaml \
+              -f k8s/02-observability/grafana/deployment.yaml
 
 kubectl rollout restart deployment -n fcg
 ```
@@ -308,7 +310,16 @@ barrou, o backend nunca acordou.
 ```bash
 curl -s -X POST "$API/api/auth/login" \
   -H 'Content-Type: application/json' \
-  -d '{"email":"...","senha":"..."}'
+  -d '{"email":"admin@fcg.com","senha":"<senha-do-administrador>"}'
+```
+
+O usuário administrativo é semeado na migration. A senha é a `ADMINSEED_PASSWORD` do **arquivo
+de perfil da instância** — não a do laptop, que carrega placeholders. Rodar o login de dentro
+da instância evita que ela apareça no histórico do terminal local:
+
+```bash
+# na instância, em ~/fcg-ops
+SENHA=$(grep '^ADMINSEED_PASSWORD=' .env.ec2 | cut -d= -f2-)
 ```
 
 O `iss` do token decodificado tem de ser **igual** à URL do gateway. Se der 401 na próxima
@@ -346,6 +357,27 @@ A prova de consumo são **três coisas juntas**: `consumers=1` na fila, `message
 `publish` e `deliver_get`, e a existência de stream de log da função. Não é o campo de
 resultado do mapeamento — ver [o mapeamento não consome](#o-mapeamento-não-consome).
 
+A saga interna se lê pelas filas, e ela é independente da função:
+
+```bash
+# na instância, em ~/fcg-ops
+U=$(grep '^RABBITMQ_USER=' .env.ec2 | cut -d= -f2-)
+P=$(grep '^RABBITMQ_PASSWORD=' .env.ec2 | cut -d= -f2-)
+H=$(grep '^RABBITMQ_HOST=' .env.ec2 | cut -d= -f2-)
+curl -sS -u "$U:$P" "https://$H/api/queues"
+```
+
+As filas de serviço (`order-placed.fcg-payments`, `payment-processed.fcg-catalog` e
+`payment-processed.fcg-catalog-projections`) saem com `consumers=1` e `messages=0` — publicado e
+consumido. As duas da função ficam com `consumers=0` enquanto o passo 7 não tiver rodado, e a
+mensagem **acumula** ali: é o retrato de topologia correta sem consumidor, não de falha.
+
+> **Read model e cache não têm prova própria nesta lista.** As rotas do catálogo os exercitam
+> por baixo, mas nenhuma das cinco os isola. Ao procurar um caminho, note que `/api/biblioteca`
+> só existe como `/api/biblioteca/{proxy+}` — o caminho sem sufixo devolve 404 **do gateway**
+> (sem `Server`), e um sufixo inexistente devolve 404 **do backend** (com `Server: Kestrel`).
+> Os dois códigos são iguais e as causas são opostas.
+
 ---
 
 ## Acesso ao Grafana
@@ -359,13 +391,42 @@ ssh -f -L 3000:localhost:3000 ec2-user@<endereço-fixo> \
 ```
 
 O `localhost:3000` do `-L` resolve **na instância**, não no laptop — quem escuta lá é o
-encaminhamento. São três portas 3000 em três máquinas. O túnel morre com a parada da
-instância e não deixa resíduo: é processo, não recurso.
+encaminhamento. São três portas 3000 em três máquinas.
+
+**O `-f` não devolve o terminal aqui.** Ele manda o SSH para segundo plano antes de executar o
+comando remoto, mas o `kubectl port-forward` não termina — a sessão fica presa até ser
+interrompida. A forma que devolve o prompt é separar as duas etapas:
+
+```bash
+# na instância, em segundo plano
+ssh ec2-user@<endereço-fixo> 'nohup kubectl port-forward -n fcg svc/grafana 3000:3000 >/dev/null 2>&1 &'
+
+# no laptop, só o encaminhamento
+ssh -f -N -L 3000:localhost:3000 ec2-user@<endereço-fixo>
+```
 
 Abra `http://localhost:3000`.
 
-A credencial administrativa vem do Secret gerado pelo `init-secrets.sh` a partir do arquivo
-de perfil — não é a embutida na imagem.
+O túnel morre com a parada da instância. **Mas a porta local pode ficar presa** se o processo
+do laptop for morto sem fechar o socket — o encaminhamento seguinte falha em `connect` com a
+3000 aparentemente livre. `Get-NetTCPConnection -LocalPort 3000 -State Listen` mostra o socket
+órfão; usar outra porta local (`-L 3001:localhost:3000`) contorna sem esperar.
+
+A credencial administrativa vem do Secret gerado pelo `init-secrets.sh` a partir do arquivo de
+perfil — **desde que o Secret e o Deployment tenham sido aplicados**, o que o passo 6 da
+abertura faz. Sem isso o cluster continua rodando a versão anterior do Deployment, com a
+credencial embutida no manifesto, e nenhum sintoma denuncia a diferença: o dashboard abre
+normalmente com o valor antigo.
+
+Para conferir de que origem vem, olhe a estrutura e não a senha:
+
+```bash
+kubectl get deployment grafana -n fcg -o jsonpath='{.spec.template.spec.containers[0].envFrom}'
+```
+
+Tem de sair `[{"secretRef":{"name":"grafana-secret"}}]`, e a lista `env` do mesmo container tem
+de estar vazia. Comparar senhas não discrimina: se o arquivo de perfil trouxer `admin`, os dois
+caminhos aceitam a mesma coisa.
 
 > **Postura:** o Service é interno e o acesso depende de já se ter SSH na instância. Se ele um
 > dia ganhar exposição, a credencial passa a valer sozinha como defesa, e a força dela no
