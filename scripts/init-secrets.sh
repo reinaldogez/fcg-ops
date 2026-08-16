@@ -350,4 +350,15 @@ echo "ok: ConfigMaps de ambiente materializados (fora do git):"
 echo "  $IDENTITY_ENV"
 echo "  $CATALOG_ENV"
 echo "  $PAYMENTS_ENV"
-echo "próximo passo: bash scripts/apply-all.sh"
+
+# O proximo passo depende de estar levantando o ambiente ou de estar so trocando um valor
+# numa sessao ja de pe: no segundo caso o apply-all reaplicaria os manifestos por cima do
+# que ja roda, e basta aplicar o que este script acabou de escrever.
+if [[ "$FCG_PERFIL" == "ec2" ]]; then
+  echo "próximo passo:"
+  echo "  cluster ja de pe  -> kubectl apply -f dos arquivos acima, depois"
+  echo "                       kubectl rollout restart deployment -n fcg"
+  echo "  levantando do zero -> bash scripts/apply-all.sh"
+else
+  echo "próximo passo: bash scripts/apply-all.sh"
+fi

@@ -54,6 +54,7 @@ vez, no começo da sessão, e mantenha-os à mão.
 | `<id-broker>` | sai do apply da abertura como `broker_name`; ou `aws mq list-brokers --query "BrokerSummaries[?starts_with(BrokerName,'fcg')].BrokerId" --output text` |
 | `<api>` | `aws apigatewayv2 get-apis --query "Items[?starts_with(Name,'fcg')].ApiId" --output text` |
 | `<região>` | `us-east-1` |
+| `<repo-da-função>` | onde estiver o clone do repositório da função serverless — outro worktree, fora deste repositório |
 
 O identificador da instância e o endereço fixo **não mudam entre sessões** — o endereço é
 associado e sobrevive à parada. O do broker muda a cada sessão, porque o broker é recriado.
@@ -138,7 +139,12 @@ aws ec2 wait instance-running --instance-ids <id-instância>
 ssh ec2-user@<endereço-fixo>
 ```
 
-O endereço IP é fixo e associado — não muda entre sessões.
+O endereço IP é fixo e associado — não muda entre sessões. A chave é a padrão do laptop, sem
+`-i`.
+
+O SSH pode avisar que a conexão **não usa troca de chaves pós-quântica**. É observação do
+cliente novo sobre o servidor da instância, não erro nem falha de autenticação: a sessão
+prossegue normalmente.
 
 ### 3. Atualizar o worktree da instância
 
@@ -148,8 +154,10 @@ de variáveis, que são não-versionados. O caminho é transferir o worktree do 
 ```bash
 tar --exclude=.git --exclude=.venv --exclude='.env*' --exclude='*.pem' \
     --exclude=terraform -cz k8s scripts observability | \
-  ssh ec2-user@<endereço-fixo> 'tar -xz -C ~/fcg-ops'
+  ssh ec2-user@<endereço-fixo> 'mkdir -p ~/fcg-ops && tar -xz -C ~/fcg-ops'
 ```
+
+O `mkdir -p` cobre a instância que ainda não tem o diretório; onde ele já existe, não faz nada.
 
 **Ordem obrigatória: worktree primeiro, arquivo de perfil depois.** O inverso produz um
 script lendo `.env.ec2` enquanto o outro escreve em `.env`, sem erro nenhum — o valor
@@ -170,6 +178,20 @@ kubectl get jobs -n fcg
 As duas consultas, não só a primeira. Um Job de migration `Failed` herdado de sessão anterior
 faz uma reaplicação futura esperar **dez minutos em silêncio**, dentro da janela paga, sem
 que a mensagem diga que está esperando Job.
+
+O esperado na nuvem é **quinze pods** `Running` e **três Jobs** `Complete`:
+
+| | |
+|---|---|
+| Serviços | `identity-api`, `catalog-api`, `payments-api` |
+| Bancos | `sqlserver-identity-0`, `postgres-catalog-0`, `postgres-payments-0`, `redis` |
+| Observabilidade | `grafana`, `prometheus`, `loki`, `tempo`, `otel-collector` |
+| Jobs | `identity-migrate`, `catalog-migrate`, `payments-migrate` |
+
+**Nem `rabbitmq` nem `dynamodb-local` sobem na nuvem, e isso é correto.** Lá o broker é o
+serviço gerenciado e o read model é a tabela real — os dois só existem como pod no perfil local,
+onde o emulador faz o papel deles. Quem conhece o ambiente local conta os pods aqui e conclui
+que faltam dois; não faltam.
 
 Tudo `Running` e os Jobs `Complete` → siga. Cluster vazio ou serviços faltando → o
 procedimento é o de [levantar-do-zero.md](levantar-do-zero.md#a-camada-de-workloads).
@@ -200,22 +222,67 @@ e TLS já ficam corretos entre sessões.
 ENV_FILE=.env.ec2 ./scripts/topologia.sh
 ```
 
-**Passe o `ENV_FILE` explicitamente.** Ao contrário dos outros dois scripts, este não escolhe
-o arquivo por perfil: sem a variável ele lê `.env`, que na instância não é o arquivo que o
-`broker-env.sh` acabou de escrever.
+**Passe o `ENV_FILE` explicitamente.** O script hoje escolhe o arquivo por perfil, como os
+outros dois, e o próprio `broker-env.sh` termina imprimindo a forma equivalente
+(`FCG_PERFIL=ec2 bash scripts/topologia.sh`) — as duas funcionam e criam a mesma topologia. O
+`ENV_FILE` explícito vence qualquer recuo, e é a defesa contra um worktree defasado na
+instância, que é um estado em que ela já foi encontrada.
 
-Depois, re-materialize a configuração e reinicie os serviços para que leiam o endereço novo:
+O que **não** protege nem uma forma nem a outra: um arquivo de perfil com o endereço de uma
+sessão anterior tem todas as chaves preenchidas, passa na pré-condição e cria a topologia no
+broker errado. A defesa é a ordem — `broker-env.sh` **antes** de `topologia.sh`, sempre.
+
+Depois, re-materialize a configuração, **aplique-a no cluster** e reinicie os serviços para que
+leiam o endereço novo:
 
 ```bash
 FCG_PERFIL=ec2 ./scripts/init-secrets.sh
+
+kubectl apply -f k8s/03-services/identity/configmap-env.yaml \
+              -f k8s/03-services/identity/secret.yaml \
+              -f k8s/03-services/catalog/configmap-env.yaml \
+              -f k8s/03-services/catalog/secret.yaml \
+              -f k8s/03-services/payments/configmap-env.yaml \
+              -f k8s/03-services/payments/secret.yaml
+
 kubectl rollout restart deployment -n fcg
 ```
 
+**O `apply` do meio não é opcional.** O `init-secrets.sh` só **escreve arquivos** — não há
+nenhuma chamada a `kubectl` dentro dele. Sem o `apply`, o `rollout restart` recria os pods
+montando o ConfigMap **antigo** do cluster, com o endereço do broker da sessão passada. Não sai
+erro em lugar nenhum: os serviços ficam `1/1 Running` acumulando falha de conexão em laço, e o
+sintoma só aparece na quinta prova da sessão verde, longe da causa.
+
+O endereço do broker vive no ConfigMap e a credencial no Secret. A credencial é estável entre
+sessões — o segredo é permanente —, mas aplicar os dois custa o mesmo e não depende dessa
+estabilidade continuar valendo.
+
+Ao fim, confirme que o endereço chegou ao cluster:
+
+```bash
+kubectl get configmap catalog-env -n fcg -o jsonpath='{.data.RabbitMq__Host}'
+```
+
+Tem de ser o endereço do broker **desta** sessão.
+
 ### 7. Aplicar o root da função (só perfil Saga)
 
-No repositório da função, por último. **A fila antes do mapeamento de origem**: mapeamento
-que aponta para fila inexistente não dá erro — dá silêncio, e o diagnóstico sai com o broker
-cobrando.
+Este passo roda **no repositório da função** — outro worktree, com Terraform próprio:
+
+```bash
+terraform -chdir=<repo-da-função>/terraform apply
+```
+
+Nenhum `-var` é necessário: o arquivo de variáveis de lá já traz o nome do broker e o
+identificador do segredo, ambos estáveis entre sessões.
+
+Por último, e **depois da topologia existir**. São duas dependências, não uma:
+
+- o broker tem de estar de pé, porque o root de lá o resolve **por nome**, e a consulta falha
+  enquanto ele não existir;
+- **a fila antes do mapeamento de origem** — mapeamento que aponta para fila inexistente não
+  dá erro, dá silêncio, e o diagnóstico sai com o broker cobrando.
 
 ---
 
@@ -310,8 +377,15 @@ de perfil — não é a embutida na imagem.
 
 **Nesta ordem, e a ordem importa.**
 
-**1. Root da função** (só perfil Saga). Primeiro, sempre: o mapeamento de origem aponta para
-o broker, e destruir o broker antes deixa mapeamento órfão.
+**1. Root da função** (só perfil Saga), no repositório da função:
+
+```bash
+terraform -chdir=<repo-da-função>/terraform destroy
+```
+
+Primeiro, sempre: o mapeamento de origem aponta para o broker, e destruir o broker antes deixa
+mapeamento órfão. A função e o mapeamento estão entre os **proibidos entre sessões** — se
+sobrarem, o inventário do passo 4 sai `exit 1`.
 
 **2. Root de sessão** (só perfil Saga):
 
