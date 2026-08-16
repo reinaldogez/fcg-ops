@@ -200,8 +200,14 @@ services:
     restart: "no"
     depends_on:
       postgres-catalog: { condition: service_healthy }
+      dynamodb-local:   { condition: service_healthy }
     environment:
       ConnectionStrings__Catalog: ${CATALOG_DB_CONNECTION}
+      # read model da biblioteca: o boot da migration tambem le esta configuracao,
+      # entao precisa da mesma paridade que o catalog-api ja tem.
+      DynamoDb__TableName: fcg-biblioteca
+      DynamoDb__ServiceUrl: http://dynamodb-local:8000
+      AWS_REGION: us-east-1
 
   # API de catalogo: resource server que valida tokens do identity via JWKS
   # (busca lazy com retry na primeira request autenticada; por isso sem depends_on
