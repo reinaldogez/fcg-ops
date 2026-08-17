@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from conftest import (
     CAMINHO_DISCOVERY,
     CAMINHO_JWKS,
@@ -120,6 +122,54 @@ def test_paginacao_limita_o_tamanho_da_pagina(cliente_usuario: ClienteApi) -> No
     itens = resposta.json()
     assert 0 < len(itens) <= tamanho, (
         f"pedi pagina de {tamanho} itens e vieram {len(itens)}.\n{descreve(resposta)}"
+    )
+
+
+def test_segunda_pagina_traz_itens_diferentes_da_primeira(
+    cliente_usuario: ClienteApi, catalogo: list[Jogo]
+) -> None:
+    """A segunda pagina anda no catalogo em vez de repetir a primeira.
+
+    O tamanho da pagina sozinho nao pega o defeito classico: um deslocamento
+    ignorado devolve a mesma fatia em toda pagina, com o tamanho sempre correto.
+    O que separa os dois casos e a interseccao entre as paginas, que tem de ser
+    vazia.
+    """
+    tamanho = 2
+    minimo = tamanho * 2
+    if len(catalogo) < minimo:
+        pytest.skip(
+            f"o catalogo tem {len(catalogo)} itens e a segunda pagina de "
+            f"{tamanho} so existe a partir de {minimo}."
+        )
+
+    primeira = cliente_usuario.get("/api/jogos", params={"pagina": 1, "tamanhoPagina": tamanho})
+    assert primeira.status_code == 200, (
+        f"a primeira pagina deveria devolver 200.\n{descreve(primeira)}"
+    )
+    ids_primeira = [item["id"] for item in primeira.json()]
+    assert len(ids_primeira) == tamanho, (
+        f"pedi a primeira pagina com {tamanho} itens e vieram {len(ids_primeira)}: "
+        f"sem ela cheia, a comparacao com a segunda nao distingue deslocamento "
+        f"ignorado de catalogo curto.\n{descreve(primeira)}"
+    )
+
+    segunda = cliente_usuario.get("/api/jogos", params={"pagina": 2, "tamanhoPagina": tamanho})
+    assert segunda.status_code == 200, (
+        f"a segunda pagina deveria devolver 200.\n{descreve(segunda)}"
+    )
+    ids_segunda = [item["id"] for item in segunda.json()]
+    assert ids_segunda, (
+        f"a segunda pagina veio vazia, e o catalogo tem {len(catalogo)} itens — "
+        f"cabem ao menos {minimo} em duas paginas de {tamanho}.\n{descreve(segunda)}"
+    )
+
+    repetidos = set(ids_primeira) & set(ids_segunda)
+    assert not repetidos, (
+        f"a segunda pagina repete {len(repetidos)} item(ns) da primeira: {sorted(repetidos)}.\n"
+        f"  primeira: {ids_primeira}\n  segunda:  {ids_segunda}\n"
+        "  o deslocamento da paginacao esta sendo ignorado — toda pagina devolve "
+        "a mesma fatia, e o tamanho correto esconde isso."
     )
 
 

@@ -12,11 +12,14 @@ from __future__ import annotations
 import pytest
 
 from conftest import Jogo, Usuario
-from fcg.cliente import ClienteApi, descreve
+from fcg.cliente import ClienteApi, descreve, respondido_pelo_backend
 from fcg.config import Config
 from fcg.saga import aguarda_desfecho
 
 MOTIVO_ACIMA_DO_LIMITE = "Valor acima do limite autorizado"
+
+# a plataforma recusa a compra de um jogo que o titular ja possui.
+STATUS_JOGO_JA_NA_BIBLIOTECA = 409
 
 
 def itens_da_biblioteca(cliente: ClienteApi, usuario_id: str) -> list[dict]:
@@ -117,4 +120,46 @@ def test_recusa_nao_projeta_no_read_model(
     )
     assert all(item["jogoId"] != jogo_caro.id for item in depois), (
         f"o jogo recusado {jogo_caro.titulo!r} aparece na biblioteca: {depois}"
+    )
+
+
+@pytest.mark.saga
+def test_compra_do_mesmo_jogo_duas_vezes_e_recusada(
+    config: Config, cliente_proprio: ClienteApi, usuario: Usuario, jogo_barato: Jogo
+) -> None:
+    """Comprar de novo o que ja esta na biblioteca e recusado com 409.
+
+    A ancora positiva e a primeira compra ter sido aprovada e projetada: sem ela
+    um 409 por outro motivo — pedido malformado, jogo inexistente — passaria por
+    correto. O que se afirma aqui e a recusa *por posse*, e ela so tem sentido
+    depois que a posse existe.
+    """
+    primeiro_id = faz_pedido(cliente_proprio, jogo_barato)
+    primeiro = aguarda_desfecho(cliente_proprio, primeiro_id, config.timeout_saga)
+    assert primeiro.aprovado, (
+        f"a primeira compra de {jogo_barato.titulo!r} terminou {primeiro.status!r}, "
+        f"motivo {primeiro.motivo_recusa!r}. sem posse estabelecida, a recusa da "
+        "segunda nao prova nada."
+    )
+
+    na_biblioteca = itens_da_biblioteca(cliente_proprio, usuario.id)
+    assert any(item["jogoId"] == jogo_barato.id for item in na_biblioteca), (
+        "a primeira compra foi aprovada mas o jogo nao chegou a biblioteca, entao "
+        f"a segunda tentativa nao encontra posse para recusar. itens: {na_biblioteca}"
+    )
+
+    # sem passar pelo helper: ele exige o 202 do caminho feliz, e o que se espera
+    # aqui e justamente a recusa.
+    repetido = cliente_proprio.post("/api/pedidos", {"jogoId": jogo_barato.id})
+
+    assert repetido.status_code == STATUS_JOGO_JA_NA_BIBLIOTECA, (
+        f"o segundo pedido de {jogo_barato.titulo!r}, ja na biblioteca do titular, "
+        f"deveria ser recusado com {STATUS_JOGO_JA_NA_BIBLIOTECA}.\n{descreve(repetido)}\n"
+        "  aceito com 202 significa compra duplicada: o titular paga duas vezes "
+        "pelo mesmo jogo."
+    )
+    assert respondido_pelo_backend(repetido), (
+        "a recusa da compra duplicada veio da borda, nao do servico — entao ela "
+        "nao prova que a regra de posse foi aplicada.\n"
+        f"{descreve(repetido)}"
     )
