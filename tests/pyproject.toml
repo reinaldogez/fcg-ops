@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     "pytest>=8.0",
     "requests>=2.32",
+    # assina os tokens forjados dos testes de recusa. o extra traz o backend
+    # assimetrico, sem o qual o RS256 do emissor nao existe.
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -27,12 +30,16 @@ select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "BLE", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # fixture do pytest recebe outras fixtures por nome: anotar o retorno basta.
 "conftest.py" = ["ANN401"]
+# as declaracoes de um token sao JSON arbitrario: o tipo delas e Any de fato, e
+# estreitar a anotacao mentiria sobre o que a forja aceita.
+"borda/test_token.py" = ["ANN401"]
 
 [tool.pytest.ini_options]
-testpaths = ["borda"]
+testpaths = ["borda", "interno"]
 # -ra mostra o resumo de tudo que nao passou; --strict-markers barra marcador
 # escrito errado, que de outro modo viraria teste silenciosamente ignorado.
 addopts = "-ra --strict-markers"
 markers = [
     "saga: exercita a saga de compra ponta a ponta, com espera assincrona",
+    "cache: observa o cache por dentro do cluster, e nao pela borda publica",
 ]

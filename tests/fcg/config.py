@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 VAR_BASE_URL = "FCG_API_BASE_URL"
 VAR_ADMIN_SENHA = "FCG_ADMIN_PASSWORD"
 VAR_ADMIN_EMAIL = "FCG_ADMIN_EMAIL"
 VAR_TIMEOUT_SAGA = "FCG_TIMEOUT_SAGA"
+VAR_CHAVE_ASSINATURA = "FCG_RSA_PRIVATE_KEY_PATH"
+VAR_DESTINO_SSH = "FCG_CLUSTER_SSH"
 
 # o administrador e semeado com endereco fixo pelo servico de identidade; so a
 # senha varia por ambiente.
@@ -28,6 +31,14 @@ TIMEOUT_SAGA_PADRAO = 30.0
 # ligacao privada e descoberta de servico, entao o primeiro acesso e mais lento
 # que os seguintes.
 TIMEOUT_REQUISICAO = 30.0
+
+
+class ChaveDeAssinaturaIndisponivelError(RuntimeError):
+    """Chave privada do emissor nao esta ao alcance desta execucao.
+
+    Nao e defeito da plataforma: e a suite rodando sem o material que permite
+    forjar token. Os testes que dependem dela se pulam sozinhos.
+    """
 
 
 class ConfiguracaoAusenteError(RuntimeError):
@@ -50,6 +61,8 @@ class Config:
     admin_email: str
     admin_senha: str
     timeout_saga: float
+    caminho_chave_assinatura: Path | None
+    destino_ssh: str | None
 
     @classmethod
     def do_ambiente(cls) -> Config:
@@ -64,7 +77,29 @@ class Config:
                 "e a senha do administrador semeado, que varia por ambiente",
             ),
             timeout_saga=_float_opcional(VAR_TIMEOUT_SAGA, TIMEOUT_SAGA_PADRAO),
+            caminho_chave_assinatura=_caminho_opcional(VAR_CHAVE_ASSINATURA),
+            destino_ssh=os.environ.get(VAR_DESTINO_SSH, "").strip() or None,
         )
+
+    def chave_de_assinatura(self) -> str:
+        """Le a chave privada do emissor, ou diz por que nao da para ler.
+
+        A chave nao e versionada e roda entre ambientes: o caminho vem do
+        ambiente e o conteudo nunca encosta no repositorio. Quem chama trata a
+        ausencia como teste pulado, nao como falha — token forjado e um reforco
+        da suite, nao o piso dela.
+        """
+        if self.caminho_chave_assinatura is None:
+            raise ChaveDeAssinaturaIndisponivelError(
+                f"{VAR_CHAVE_ASSINATURA} nao definida — sem ela nao ha como assinar "
+                "os tokens forjados dos testes de recusa."
+            )
+        try:
+            return self.caminho_chave_assinatura.read_text(encoding="utf-8")
+        except OSError as erro:
+            raise ChaveDeAssinaturaIndisponivelError(
+                f"nao consegui ler a chave em {self.caminho_chave_assinatura}: {erro}"
+            ) from erro
 
 
 def _obrigatoria(variavel: str, para_que: str) -> str:
@@ -72,6 +107,11 @@ def _obrigatoria(variavel: str, para_que: str) -> str:
     if not valor:
         raise ConfiguracaoAusenteError(variavel, para_que)
     return valor
+
+
+def _caminho_opcional(variavel: str) -> Path | None:
+    bruto = os.environ.get(variavel, "").strip()
+    return Path(bruto).expanduser() if bruto else None
 
 
 def _float_opcional(variavel: str, padrao: float) -> float:
