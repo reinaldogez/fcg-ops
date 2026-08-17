@@ -292,6 +292,10 @@ terraform -chdir=<repo-da-função>/terraform apply
 Nenhum `-var` é necessário: o arquivo de variáveis de lá já traz o nome do broker e o
 identificador do segredo, ambos estáveis entre sessões.
 
+O plano tem de sair **`7 to add, 0 to change, 0 to destroy`** — a função, a tabela de
+idempotência, o papel e a política, o grupo de log e os dois mapeamentos de origem. Leva ~4
+minutos: os mapeamentos nascem em paralelo e dominam o tempo; o resto sai em segundos.
+
 Por último, e **depois da topologia existir**. São duas dependências, não uma:
 
 - o broker tem de estar de pé, porque o root de lá o resolve **por nome**, e a consulta falha
@@ -461,6 +465,9 @@ Primeiro, sempre: o mapeamento de origem aponta para o broker, e destruir o brok
 mapeamento órfão. A função e o mapeamento estão entre os **proibidos entre sessões** — se
 sobrarem, o inventário do passo 4 sai `exit 1`.
 
+Sai `7 destroyed` em menos de meio minuto — a destruição é muito mais rápida que a criação, e os
+mapeamentos que levaram minutos para nascer somem em segundos.
+
 **2. Root de sessão** (só perfil Saga):
 
 ```bash
@@ -612,8 +619,10 @@ sucesso. Ler só esse campo dá "ainda quebrado" com o caminho funcionando.
 A prova de consumo são três coisas juntas: `consumers=1` na fila, `message_stats` com
 `publish` e `deliver_get`, e a existência de stream de log.
 
-Ao procurar a invocação no log, **enumere as streams sem limite**. A função cria uma stream
-por invocação, e limitar a consulta a um item devolve a stream errada por causa da paginação.
+Ao procurar a invocação no log, **enumere as streams sem limite**. Limitar a consulta a um item
+devolve a stream errada por causa da paginação. A stream é por **ambiente de execução**, não por
+invocação: invocações próximas reaproveitam a mesma (o campo `cold_start` distingue a primeira
+das seguintes), e uma pausa longa o bastante para reciclar o ambiente abre outra.
 
 Se o mapeamento realmente não alcançar o broker, a mensagem de erro avança a cada conserto —
 é a única forma de saber que o anterior pegou. Dois fatos que se generalizam: grupo declarado
