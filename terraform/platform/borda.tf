@@ -98,6 +98,43 @@ locals {
   api_issuer = "https://${aws_apigatewayv2_api.fcg.id}.execute-api.${var.aws_region}.amazonaws.com"
 }
 
+# A criacao do authorizer busca este documento e aborta o apply com 400 se ele nao
+# responder. Aqui o motivo aparece antes, em vez de a falha chegar como erro de
+# requisicao invalida com o apply pela metade.
+#
+# Bloco de verificacao, e nao pre-condicao: pre-condicao reprova o plano inteiro
+# enquanto o discovery nao responder, e ha aplicacao legitima nesse estado -- a
+# correcao do endereco de administracao entre as duas fases e exatamente isso.
+# Aviso informa sem impedir.
+#
+# O segundo assert compara o emissor anunciado com o que o authorizer vai exigir:
+# a divergencia nao quebra apply nenhum, ela aparece como 401 com token valido em
+# toda rota protegida, e so em runtime.
+#
+# A leitura fica fora do bloco de verificacao de proposito. Declarada dentro, ela
+# vira leitura adiantada para o apply e o plano nunca mais converge: sai sempre
+# "will be read during apply", e o codigo de saida detalhado passa a 2 mesmo sem
+# mudanca alguma. Fora, e lida no proprio plano e a convergencia se mantem.
+#
+# O try cobre o bootstrap: com o interruptor desligado a lista fica vazia, o
+# indice falha, e o valor de reserva faz os dois assert passarem calados.
+data "http" "openid" {
+  count = var.authorizer_ligado ? 1 : 0
+  url   = "${local.api_issuer}/.well-known/openid-configuration"
+}
+
+check "discovery_do_identity" {
+  assert {
+    condition     = try(data.http.openid[0].status_code, 200) == 200
+    error_message = "O documento de descoberta não respondeu 200 (status ${try(data.http.openid[0].status_code, 0)}). O authorizer não nasce assim: suba o cluster com o identity de pé antes, ou aplique com -var authorizer_ligado=false."
+  }
+
+  assert {
+    condition     = try(jsondecode(data.http.openid[0].response_body).issuer, local.api_issuer) == local.api_issuer
+    error_message = "O emissor anunciado pela descoberta difere do que o authorizer vai exigir. Esperado ${local.api_issuer}; recebido '${try(jsondecode(data.http.openid[0].response_body).issuer, "corpo não-JSON")}'. Barra final é a divergência mais comum, e ela produz 401 com token válido em toda rota protegida."
+  }
+}
+
 # A primeira fase do bootstrap nao cria authorizer nenhum. Nao ha depends_on para
 # a rota de discovery: o grafo do Terraform e granular por recurso, e nao por
 # elemento, entao qualquer aresta daqui de volta para as rotas fecha ciclo com as

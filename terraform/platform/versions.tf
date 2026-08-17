@@ -12,6 +12,13 @@ terraform {
       source  = "hashicorp/random"
       version = ">= 3.0"
     }
+
+    # le o documento de descoberta no bloco de verificacao da borda. nao cria
+    # recurso nem entra no estado.
+    http = {
+      source  = "hashicorp/http"
+      version = ">= 3.0"
+    }
   }
 
   # sem bloco backend: o estado fica local e fora do versionamento. o root de
