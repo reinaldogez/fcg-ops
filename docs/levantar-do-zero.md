@@ -63,6 +63,11 @@ desligar produziu `3 to add, 0 to change, 0 to destroy`; religar produziu
 
 ## Passo 1 — plataforma sem autenticação de borda
 
+Antes do primeiro comando, confira
+[a máquina de quem administra](runbook-sessao.md#a-máquina-de-quem-administra) — ferramentas
+necessárias e as idiossincrasias do terminal. Uma delas produz **falso negativo no inventário
+deste passo**, e some com a saída que o documento diz para esperar.
+
 Preencha o `terraform.tfvars` a partir do `terraform.tfvars.example`, com atenção ao
 `admin_cidr` — é o endereço `/32` da máquina que vai administrar, e ele caduca quando o
 provedor troca o IP.
