@@ -13,6 +13,7 @@ rodam na instância estão marcados como tal.
 ## Sumário
 
 - [Os dois perfis](#os-dois-perfis)
+- [A máquina de quem administra](#a-máquina-de-quem-administra)
 - [As coordenadas da plataforma](#as-coordenadas-da-plataforma)
 - [Antes de iniciar a instância](#antes-de-iniciar-a-instância)
 - [Abertura](#abertura)
@@ -39,6 +40,64 @@ rodam na instância estão marcados como tal.
 **Na dúvida, Borda.** Subir o broker depois custa doze minutos; esquecê-lo ligado custa a
 noite. O perfil Borda cobre tudo que não é mensageria: autenticação, rotas protegidas,
 discovery, catálogo, read model, cache e dashboard.
+
+---
+
+## A máquina de quem administra
+
+Esta seção é sobre o computador de onde os comandos saem, não sobre a plataforma. Num Linux ou
+macOS quase nada aqui se aplica; num Windows com o Git para Windows, tudo se aplica.
+
+**O que precisa existir:** `terraform`, `aws`, `kubectl`, `ssh`, `scp`, `tar`, `git`, e um
+Python com a suíte de testes se for rodá-la. A credencial da AWS é a do usuário de operação,
+conferida com `aws sts get-caller-identity` antes de qualquer coisa.
+
+### A conversão de caminho do MSYS, e o comando que mente
+
+O `bash` que acompanha o Git para Windows roda sobre MSYS, que **reescreve todo argumento
+começado por `/`** como caminho do Windows antes de entregá-lo a um executável nativo. O
+`aws.exe` é nativo. O efeito:
+
+```
+/aws/lambda/fcg-notifications-fn   →   C:/Program Files/Git/aws/lambda/fcg-notifications-fn
+```
+
+Dois sintomas, e o segundo é o caro:
+
+| Comando | O que acontece |
+|---|---|
+| `aws logs describe-log-streams --log-group-name /aws/...` | `InvalidParameterException` — reclama, e você percebe |
+| `aws logs filter-log-events --log-group-name /aws/...` | **volta vazio, com `exit 0`** — parece que nada aconteceu |
+
+O segundo já produziu um diagnóstico errado: log vazio lido como "a função nunca foi invocada",
+contra **23 invocações** que a métrica do CloudWatch mostrava. Um comando que passa por não ter
+feito nada é pior que um que falha.
+
+**Conserto**, uma vez por terminal, antes de qualquer `aws` com argumento em `/`:
+
+```bash
+export MSYS2_ARG_CONV_EXCL='*'
+```
+
+Fora do MSYS a variável não tem efeito nenhum, então exportá-la sempre é seguro.
+
+O `inventario-aws.sh` **já faz esse export sozinho**, no topo — mas isso protege só o que roda
+dentro dele. Consulta avulsa na linha de comando continua desprotegida, e é onde o erro
+aparece.
+
+**Quando o resultado for "nada aconteceu", confirme por outro caminho** antes de concluir:
+métrica do CloudWatch em vez de log, `describe-*` em vez de `filter-*`. Ausência de resultado e
+falha silenciosa são indistinguíveis aqui.
+
+### Duas medidas, não uma
+
+Invocar o inventário exige o caminho explícito do interpretador **e** a variável — cada uma
+resolve um problema diferente, e cada uma sozinha já foi medida falhando. Ver
+[o gate acusa AUSENTE](#o-gate-acusa-ausente-um-recurso-que-existe).
+
+Há **três** `bash` nesta máquina, e eles não são intercambiáveis: o do Git para Windows (o que
+os scripts esperam), o do WSL — que é outro sistema de arquivos e não enxerga o worktree — e o
+que o PowerShell resolve por padrão, que costuma ser o do WSL. Daí o caminho explícito.
 
 ---
 
@@ -645,6 +704,40 @@ receberam?"*. Para a segunda pergunta, a fonte é o grupo de log de acesso do ga
 A exceção que confirma a regra: um 429 de throttle **aparece**, porque o throttle é aplicado
 depois do roteamento e o serviço o contabilizou. O discriminador não é "erro de infra vs. de
 aplicação" — é **quem redigiu a resposta**.
+
+### `kubectl apply -R` aplica também os templates
+
+Os diretórios de manifesto guardam, lado a lado, o arquivo real (`secret.yaml`) e o template
+versionado com placeholder (`secret.example.yaml`). Um `kubectl apply -R -f k8s/` aplica os
+**dois**, e o que vale é o último a ser aplicado.
+
+Hoje o acaso protege: `secret.example.yaml` ordena antes de `secret.yaml`, então o real vence e
+nada quebra. É proteção frágil — depende de nome de arquivo, não de intenção. Renomear um
+template ou acrescentar um sufixo pode inverter a ordem, e o sintoma seria um Secret com
+placeholder no cluster, sem erro em lugar nenhum.
+
+O `apply-all.sh` **não** tem esse risco: ele filtra explicitamente (`! -name '*.example.yaml'`).
+O risco é do `apply -R` digitado à mão. Aplique pelo script, ou nomeie os arquivos um a um.
+
+### O Job de migration exige a chave RSA, não só o banco
+
+O `identity-migrate` não sobe só com a connection string: ele cobra também
+`Jwt__RsaPrivateKeyPem`. Faltando a chave, o Job falha por motivo que não menciona chave
+nenhuma, e a leitura natural é procurar defeito no banco.
+
+A chave sai do `init-secrets.sh`, que a gera se não encontrar nenhuma — então o caminho normal
+já cobre. O caso que morde é materializar Secret à mão, pulando o script.
+
+### Senha nova de Postgres não vale em volume que já existe
+
+A senha do Postgres é gravada **na inicialização do volume**, e só nela. Trocar
+`POSTGRES_CATALOG_PASSWORD` no arquivo de perfil e reaplicar não muda a senha de um banco que
+já nasceu: o volume persiste, a variável nova é ignorada, e o serviço passa a falhar
+autenticação com `28P01`.
+
+Num levantamento do zero isso não aparece — o volume é novo. Aparece ao reaplicar sobre um
+cluster que já rodou. Conserto: `ALTER USER` no banco de pé, ou destruir o volume e deixá-lo
+renascer.
 
 ### Comando que passa por não ter feito nada
 
