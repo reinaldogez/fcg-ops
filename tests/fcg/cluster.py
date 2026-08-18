@@ -158,3 +158,73 @@ class Redis:
             if linha.startswith(f"{nome}:"):
                 return int(linha.split(":", 1)[1])
         raise ClusterInacessivelError(f"a estatistica {nome} nao veio no INFO do Redis.")
+
+
+@dataclass(frozen=True, slots=True)
+class ServicoInterno:
+    """Fala com um servico pela porta de no, sem passar pela borda publica.
+
+    Existe para medir tempo. Pela borda, o trajeto pela internet responde por
+    quase todo o tempo de uma requisicao e afoga qualquer diferenca de poucos
+    milissegundos entre servir do cache e servir do banco. Da instancia, o
+    mesmo servico responde pela rede local do no, e a diferenca reaparece.
+
+    O token entra no `curl` por arquivo de configuracao na entrada padrao, pelo
+    mesmo motivo que a senha do broker: argumento aparece no `ps`.
+    """
+
+    acesso: AcessoCluster
+    porta: int
+
+    def mede_segundos(self, caminho: str, token: str) -> float:
+        """Tempo total de uma requisicao, em segundos."""
+        url = f"http://localhost:{self.porta}/{caminho.lstrip('/')}"
+        script = (
+            f"printf 'header = \"Authorization: Bearer %s\"\\n' {shlex.quote(token)} | "
+            f"curl -sS --config - -o /dev/null -w '%{{time_total}}' {shlex.quote(url)}"
+        )
+        bruto = self.acesso.executa(script).strip()
+        try:
+            return float(bruto)
+        except ValueError as erro:
+            raise ClusterInacessivelError(
+                f"esperava um tempo em segundos e veio: {bruto[:200]!r}"
+            ) from erro
+
+
+@dataclass(frozen=True, slots=True)
+class Postgres:
+    """Consulta um dos bancos dos servicos, de dentro do pod.
+
+    Serve ao que so existe no banco e nao aparece em rota nenhuma: as tabelas de
+    outbox e inbox, que sao o mecanismo de entrega confiavel entre servicos.
+    """
+
+    acesso: AcessoCluster
+    pod: str
+    banco: str
+    usuario: str = "postgres"
+
+    def consulta_escalar(self, sql: str) -> str:
+        """Roda um SELECT de valor unico e devolve o resultado como texto.
+
+        O `-tA` tira cabecalho, rodape e alinhamento: sobra so o valor, que e o
+        que se compara. Sem isso, cada leitura viria com moldura para limpar.
+        """
+        interno = shlex.quote(sql)
+        script = (
+            f"kubectl -n {self.acesso.namespace} exec {self.pod} --"
+            f" psql -U {self.usuario} -d {self.banco} -tA -c {interno}"
+        )
+        return self.acesso.executa(script).replace("\r", "").strip()
+
+    def conta(self, tabela: str, onde: str | None = None) -> int:
+        """Numero de linhas da tabela, opcionalmente filtradas."""
+        filtro = f" WHERE {onde}" if onde else ""
+        bruto = self.consulta_escalar(f"SELECT count(*) FROM {tabela}{filtro};")
+        try:
+            return int(bruto)
+        except ValueError as erro:
+            raise ClusterInacessivelError(
+                f"esperava um numero ao contar {tabela} e veio: {bruto[:200]!r}"
+            ) from erro

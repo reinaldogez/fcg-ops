@@ -33,6 +33,10 @@ select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "BLE", "RUF"]
 # as declaracoes de um token sao JSON arbitrario: o tipo delas e Any de fato, e
 # estreitar a anotacao mentiria sobre o que a forja aceita.
 "borda/test_token.py" = ["ANN401"]
+# atributo de item e resposta de interface de administracao tambem sao JSON
+# arbitrario: quem consome e que sabe a forma esperada.
+"fcg/leitura.py" = ["ANN401"]
+"fcg/mensageria.py" = ["ANN401"]
 
 [tool.pytest.ini_options]
 testpaths = ["borda", "interno"]

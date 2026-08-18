@@ -10,8 +10,20 @@ from __future__ import annotations
 
 import pytest
 
-from fcg.cluster import AcessoCluster, ClusterInacessivelError, Redis
+from fcg.cluster import (
+    AcessoCluster,
+    ClusterInacessivelError,
+    Postgres,
+    Redis,
+    ServicoInterno,
+)
 from fcg.config import VAR_DESTINO_SSH, Config
+from fcg.leitura import Biblioteca, ReadModelInacessivelError
+from fcg.mensageria import Broker
+
+# porta de no do catalog, fixada nos manifestos. e por ela que se alcanca o
+# servico de dentro da instancia, sem atravessar a borda.
+PORTA_DE_NO_DO_CATALOG = 30083
 
 
 @pytest.fixture(scope="session")
@@ -40,3 +52,37 @@ def acesso_cluster(config: Config) -> AcessoCluster:
 def redis(acesso_cluster: AcessoCluster) -> Redis:
     """Cliente do Redis interno, para observar o cache por dentro."""
     return Redis(acesso=acesso_cluster)
+
+
+@pytest.fixture(scope="session")
+def catalog_interno(acesso_cluster: AcessoCluster) -> ServicoInterno:
+    """O catalog pela porta de no, para medir tempo sem a internet no meio."""
+    return ServicoInterno(acesso=acesso_cluster, porta=PORTA_DE_NO_DO_CATALOG)
+
+
+@pytest.fixture(scope="session")
+def banco_catalog(acesso_cluster: AcessoCluster) -> Postgres:
+    """Banco do catalog, onde vivem as tabelas de outbox e inbox."""
+    return Postgres(acesso=acesso_cluster, pod="postgres-catalog-0", banco="catalog")
+
+
+@pytest.fixture(scope="session")
+def broker(acesso_cluster: AcessoCluster) -> Broker:
+    """Interface de administracao do broker, para capturar e reentregar."""
+    return Broker(acesso=acesso_cluster)
+
+
+@pytest.fixture(scope="session")
+def read_model() -> Biblioteca:
+    """Tabela do read model, ou o teste se pula.
+
+    A tabela mora na nuvem e nao no cluster: o canal e a credencial de quem
+    executa, nao o ssh. Sem ela, pular — credencial local ausente nao e defeito
+    de plataforma.
+    """
+    biblioteca = Biblioteca()
+    try:
+        biblioteca.confere_alcance()
+    except ReadModelInacessivelError as erro:
+        pytest.skip(str(erro))
+    return biblioteca

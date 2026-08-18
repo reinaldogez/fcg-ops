@@ -1,16 +1,19 @@
 """O cache-aside da leitura do catalogo, observado por dentro.
 
 Pela borda o cache e invisivel: duas leituras devolvem corpos identicos e nenhum
-cabecalho diz de onde veio a resposta. Medir latencia tampouco separa os casos —
-o trajeto ate o gateway domina o tempo, e a leitura fria ja saiu mais rapida que
-a quente em rodada medida. Um teste apoiado nisso seria intermitente.
+cabecalho diz de onde veio a resposta. **Latencia pela borda tampouco separa os
+casos** — medido, o trajeto ate o gateway custa ~70ms e a economia do cache e de
+~2ms, entao a diferenca some no ruido e a leitura fria chega a sair mais rapida
+que a quente. Isso e limitacao do canal, e nao do cache: medido de dentro, sem a
+internet no meio, a leitura quente custa **metade** da fria.
 
-O que separa os dois casos e o estado do proprio Redis, e ele so se alcanca de
-dentro do cluster. Cada teste aqui afirma uma etapa do ciclo do cache-aside:
+Por isso tudo aqui se observa de dentro do cluster. Cada teste afirma uma etapa
+do ciclo do cache-aside:
 
 1. leitura com o cache frio **cria** a entrada, com prazo de validade;
 2. leitura seguinte e **servida pela entrada**, e nao produz falta no Redis;
-3. escrita no catalogo **invalida** o que estava cacheado.
+3. servir do cache **custa menos tempo** que ir ao banco;
+4. escrita no catalogo **invalida** o que estava cacheado.
 
 A chave carrega a paginacao (`jogos:lista:v<versao>:p<pagina>:t<tamanho>`), o que
 permite a cada teste usar um tamanho proprio e nao disputar entrada com os
@@ -25,7 +28,7 @@ from typing import Final
 import pytest
 
 from fcg.cliente import ClienteApi, descreve
-from fcg.cluster import Redis
+from fcg.cluster import Redis, ServicoInterno
 
 # prazo configurado para a entrada do catalogo, em segundos. e o teto declarado
 # na decisao de cache; a assercao usa "nao passa disto", nao igualdade, porque o
@@ -44,6 +47,44 @@ CHAVE_DA_VERSAO: Final = "jogos:versao"
 TAMANHO_DA_ENTRADA_FRIA: Final = 61
 TAMANHO_DO_ACERTO: Final = 62
 TAMANHO_DA_INVALIDACAO: Final = 63
+# usado so para inicializar a chave de versao, sem medir nada.
+TAMANHO_DE_AQUECIMENTO: Final = 64
+TAMANHO_DA_MEDICAO: Final = 65
+
+# quantos pares fria/quente entram na mediana. dez pares custam poucos segundos
+# e ja separam as duas distribuicoes com folga no alvo medido.
+AMOSTRAS_DA_MEDICAO: Final = 10
+
+# teto da leitura quente como fracao da fria. medido em ~50% no alvo em nuvem,
+# com as faixas sem sobreposicao; o teto e folgado de proposito, porque o no e
+# compartilhado e o teste nao existe para cravar um numero de desempenho — e
+# para pegar cache que deixou de economizar trabalho.
+TETO_DA_LEITURA_QUENTE: Final = 0.8
+
+
+def mediana(valores: list[float]) -> float:
+    """Valor central da amostra ordenada.
+
+    Mediana em vez de media: uma unica leitura lenta — pausa de coletor, disputa
+    de CPU no no — desloca a media e nao desloca a mediana.
+    """
+    ordenados = sorted(valores)
+    meio = len(ordenados) // 2
+    if len(ordenados) % 2:
+        return ordenados[meio]
+    return (ordenados[meio - 1] + ordenados[meio]) / 2
+
+
+def estabiliza_a_versao(cliente: ClienteApi, redis: Redis) -> None:
+    """Garante que a chave de versao ja exista antes de medir qualquer coisa.
+
+    Medido: num Redis recem-esvaziado — o cache mora em disco efemero, entao
+    reiniciar o pod o zera — a **primeira** leitura inicializa a versao. Uma
+    medicao que comece antes disso monta o nome da entrada com uma versao e
+    encontra a seguinte com outra, e a leitura quente aparece como falta.
+    """
+    if redis.campo(CHAVE_DA_VERSAO, CAMPO_DE_CONTEUDO) is None:
+        le_catalogo(cliente, TAMANHO_DE_AQUECIMENTO)
 
 
 def versao_do_catalogo(redis: Redis) -> str:
@@ -77,6 +118,7 @@ def test_leitura_fria_cria_a_entrada_no_cache(cliente_usuario: ClienteApi, redis
     sem apagar primeiro, uma entrada deixada por outra leitura faria este teste
     passar sem que nada tivesse sido gravado agora.
     """
+    estabiliza_a_versao(cliente_usuario, redis)
     chave = chave_da_lista(redis, TAMANHO_DA_ENTRADA_FRIA)
     redis.apaga(chave)
     assert not redis.existe(chave), (
@@ -116,6 +158,7 @@ def test_segunda_leitura_e_servida_pelo_cache(cliente_usuario: ClienteApi, redis
     consulta antes a versao do catalogo. Quem comparar acertos ve o mesmo numero
     nos dois casos e conclui que o cache nao serve nada.
     """
+    estabiliza_a_versao(cliente_usuario, redis)
     chave = chave_da_lista(redis, TAMANHO_DO_ACERTO)
     redis.apaga(chave)
 
@@ -146,6 +189,50 @@ def test_segunda_leitura_e_servida_pelo_cache(cliente_usuario: ClienteApi, redis
 
 
 @pytest.mark.cache
+def test_leitura_do_cache_e_mais_rapida_que_a_do_banco(
+    cliente_usuario: ClienteApi,
+    catalog_interno: ServicoInterno,
+    token_admin: str,
+    redis: Redis,
+) -> None:
+    """Servir do cache custa menos tempo que ir ao banco.
+
+    A medicao e feita **pela porta de no**, e nao pela borda: pela borda o
+    trajeto ate o gateway responde por quase todo o tempo — medido, ~70ms contra
+    ~2ms de diferenca — e afoga o ganho. Da instancia, sobra servico mais
+    banco/cache, e a diferenca fica visivel.
+
+    A comparacao usa medianas de varias amostras, e nao um par de leituras: uma
+    amostra isolada pega pausa de coletor de lixo, agendamento do no ou
+    retentativa de conexao, e qualquer uma inverte o resultado.
+    """
+    estabiliza_a_versao(cliente_usuario, redis)
+    caminho = f"/api/jogos?pagina=1&tamanhoPagina={TAMANHO_DA_MEDICAO}"
+    chave = chave_da_lista(redis, TAMANHO_DA_MEDICAO)
+
+    frias: list[float] = []
+    quentes: list[float] = []
+    for _ in range(AMOSTRAS_DA_MEDICAO):
+        redis.apaga(chave)
+        frias.append(catalog_interno.mede_segundos(caminho, token_admin))
+        quentes.append(catalog_interno.mede_segundos(caminho, token_admin))
+
+    fria = mediana(frias)
+    quente = mediana(quentes)
+
+    assert quente < fria * TETO_DA_LEITURA_QUENTE, (
+        f"a leitura servida pelo cache levou {quente * 1000:.1f}ms contra "
+        f"{fria * 1000:.1f}ms da que foi ao banco — esperava no maximo "
+        f"{TETO_DA_LEITURA_QUENTE:.0%} do tempo.\n"
+        f"  amostras frias (ms):   {[round(v * 1000, 1) for v in sorted(frias)]}\n"
+        f"  amostras quentes (ms): {[round(v * 1000, 1) for v in sorted(quentes)]}\n"
+        "  o cache esta sendo consultado mas nao economiza trabalho: procure "
+        "leitura que vai ao banco de qualquer jeito, ou serializacao refeita a "
+        "cada resposta."
+    )
+
+
+@pytest.mark.cache
 def test_escrita_no_catalogo_invalida_o_que_estava_cacheado(
     cliente_admin: ClienteApi, cliente_usuario: ClienteApi, redis: Redis
 ) -> None:
@@ -156,6 +243,7 @@ def test_escrita_no_catalogo_invalida_o_que_estava_cacheado(
     antiga fica orfa — o efeito observavel e que a chave *corrente* passa a ser
     outra, e a antiga deixa de ser consultada.
     """
+    estabiliza_a_versao(cliente_usuario, redis)
     chave_antiga = chave_da_lista(redis, TAMANHO_DA_INVALIDACAO)
     le_catalogo(cliente_usuario, TAMANHO_DA_INVALIDACAO)
     assert redis.existe(chave_antiga), (
