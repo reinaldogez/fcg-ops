@@ -68,6 +68,11 @@ São duas camadas, e o que as separa é o **canal**, não o alvo: a plataforma �
 borda roda de qualquer máquina; a interna precisa de caminho até o cluster e **se pula** quando
 ele não existe — falta de acesso não é defeito de plataforma.
 
+A camada interna existe porque três mecanismos centrais do desenho — cache, entrega confiável e
+read model — **não têm sintoma externo quando quebram**. Uma biblioteca servida pelo banco
+errado, um evento processado duas vezes e um cache que nunca é lido devolvem, todos, respostas
+idênticas às corretas.
+
 `borda/` — o contrato externo, visto de fora:
 
 - **`test_autorizacao.py`** — rota protegida sem token e caminho inexistente são barrados
@@ -84,7 +89,14 @@ ele não existe — falta de acesso não é defeito de plataforma.
 `interno/` — o que só se observa de dentro do cluster, por SSH + `kubectl`:
 
 - **`test_cache.py`** — o ciclo do cache-aside do catálogo: a leitura fria grava a entrada com
-  prazo, a seguinte é servida por ela, e a escrita no catálogo invalida o que estava cacheado.
+  prazo, a seguinte é servida por ela e custa metade do tempo, e a escrita no catálogo invalida
+  o que estava cacheado.
+- **`test_outbox.py`** — entrega confiável: depois da compra convergir não sobra mensagem por
+  despachar, e o consumo de um evento novo deixa registro na tabela de entrada.
+- **`test_idempotencia.py`** — um evento **real**, capturado do broker e reentregue com o mesmo
+  identificador, não credita a biblioteca duas vezes.
+- **`test_read_model.py`** — a leitura da biblioteca vem da projeção, provado por um item que
+  existe só nela; e os dois lados concordam sobre o conteúdo.
 
 Dois cuidados que o código mantém de propósito:
 
@@ -104,11 +116,12 @@ Dois cuidados que o código mantém de propósito:
   e quem se apoiar nele conclui que o cache não serve nada. O que separa os dois casos é o
   contador de **faltas**: `+1` na fria, `0` na quente. Medido antes de virar asserção.
 
-**Latência não é asserção de cache.** Medido no alvo em nuvem: leitura fria entre 0,041s e
-0,188s contra 0,162–0,181s na quente, com rodada em que a fria saiu *mais rápida*. O trajeto até
-o gateway domina o tempo e esconde a diferença; um teste apoiado nisso seria intermitente. A
-latência serve ao painel do Grafana, onde a série ao longo do tempo mostra o que uma amostra
-não mostra — e é lá que a melhora do cache se demonstra.
+**Latência mede-se pelo canal certo, ou não mede nada.** Pela borda, a leitura quente e a fria
+são indistinguíveis — mediana de 0,076s contra 0,079s em 12 amostras, com rodadas em que a fria
+sai *mais rápida*. Não é o cache que falha: é que o trajeto até o gateway custa ~70ms e a
+economia do cache é de ~2ms, então o ganho afunda no ruído. Medida da instância, pela porta de
+nó, a mesma leitura quente custa **metade** da fria (≈2ms contra ≈4ms), com as faixas sem
+sobreposição. É por isso que a asserção de tempo vive na camada interna, e não na de borda.
 
 ## Qualidade
 
