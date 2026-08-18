@@ -292,9 +292,10 @@ terraform -chdir=<repo-da-função>/terraform apply
 Nenhum `-var` é necessário: o arquivo de variáveis de lá já traz o nome do broker e o
 identificador do segredo, ambos estáveis entre sessões.
 
-O plano tem de sair **`7 to add, 0 to change, 0 to destroy`** — a função, a tabela de
-idempotência, o papel e a política, o grupo de log e os dois mapeamentos de origem. Leva ~4
-minutos: os mapeamentos nascem em paralelo e dominam o tempo; o resto sai em segundos.
+O plano tem de sair **`8 to add, 0 to change, 0 to destroy`** — a função, a tabela de
+idempotência, o papel e a política, o grupo de log, o empacotamento e os dois mapeamentos de
+origem. Leva 4–6 minutos: os mapeamentos nascem em paralelo e dominam o tempo — medidos em
+4m14s e 4m46s, num apply de 5m42s —; o resto sai em segundos.
 
 Por último, e **depois da topologia existir**. São duas dependências, não uma:
 
