@@ -73,6 +73,16 @@ Preencha o `terraform.tfvars` a partir do `terraform.tfvars.example`, com atenç
 provedor troca o IP.
 
 ```bash
+curl -s https://checkip.amazonaws.com
+```
+
+Use **este** serviço. Os refletores mais lembrados — `ifconfig.me` entre eles — são bloqueados
+por antivírus com filtro de rede, e o bloqueio não aparece: o `curl` volta **vazio com `exit 0`**,
+indistinguível de uma máquina sem endereço público. É o mesmo modo de falha do
+[comando que mente](runbook-sessao.md#a-conversão-de-caminho-do-msys-e-o-comando-que-mente), por
+outra causa.
+
+```bash
 terraform -chdir=terraform/platform init
 terraform -chdir=terraform/platform apply -var authorizer_ligado=false
 ```
@@ -100,11 +110,27 @@ chaves, antes do passo 2 começar.
 grep -E 'JWT_ISSUER|JWT_PUBLIC_BASE_URL' .env.ec2
 ```
 
-As duas têm de terminar no identificador da API que este passo acabou de criar. Numa conta
-virgem elas nascem do `.env.example` e se preenchem à mão. Num **relevantamento** o arquivo já
-existe, carregando o identificador da API anterior — e aí ele passa em toda pré-condição, o
-cluster sobe inteiro e serve o emissor de uma API que não existe mais. O passo 2 tem
-verificação para isso, mas o ciclo já foi gasto.
+As duas têm de terminar no identificador da API que este passo acabou de criar. **Confira o
+conteúdo, não a presença** — as duas chaves falham de maneiras opostas, e só uma delas é
+visível:
+
+| Chave | Como vem do `.env.example` | O que engana |
+|---|---|---|
+| `JWT_PUBLIC_BASE_URL` | vazia | nada: a ausência denuncia sozinha |
+| `JWT_ISSUER` | `fcg-identity` | **parece preenchida** — mas não é URL, e o authorizer exige URL `https` com discovery resolvível |
+
+O `grep` acima exibe um valor para `JWT_ISSUER` mesmo quando ele está errado. Ler a saída sem
+comparar com o emissor do passo 1 é o falso positivo mais barato de cometer neste documento, e
+o preço só chega no passo 3.
+
+Numa conta virgem as duas nascem do `.env.example` e se preenchem à mão — e ele **traz a folha
+de instruções junto**: cada variável carrega uma linha `# ec2:` dizendo o que pôr no perfil de
+nuvem, inclusive a advertência de usar `api_issuer` e não `api_invoke_url`. São dezoito
+variáveis; nenhuma precisa ser adivinhada.
+
+Num **relevantamento** o arquivo já existe, carregando o identificador da API anterior — e aí
+ele passa em toda pré-condição, o cluster sobe inteiro e serve o emissor de uma API que não
+existe mais. O passo 2 tem verificação para isso, mas o ciclo já foi gasto.
 
 Num relevantamento três coordenadas mudam, e cada uma tem um consumidor diferente:
 
@@ -245,6 +271,28 @@ terraform -chdir=terraform/platform apply
    ela está obrigatoriamente de pé — é ela que serve o discovery que o passo 3 acabou de
    consumir. O inventário só é exigível em zero depois que o fechamento da sessão para a
    máquina.
+4. Um token emitido pelo identity é **aceito** pela borda. As três primeiras verificações são
+   estruturais — provam que as peças existem, não que elas conversam:
+
+```bash
+API=<valor-de-emissor>
+
+# sem token: 401 e SEM cabecalho Server -- morreu na borda, que e o correto
+curl -s -D - -o /dev/null "$API/api/jogos" | grep -iE '^(HTTP|server)'
+
+TOKEN=$(curl -s -X POST "$API/api/auth/login" -H 'Content-Type: application/json' \
+  -d '{"email":"admin@fcg.com","senha":"<ADMINSEED_PASSWORD>"}' \
+  | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+
+# com token: 200 e COM 'server: Kestrel' -- atravessou a borda e chegou no backend
+curl -s -D - -o /dev/null "$API/api/jogos" -H "Authorization: Bearer $TOKEN" \
+  | grep -iE '^(HTTP|server)'
+```
+
+O cabeçalho `Server` é o que separa dois 401 de causas opostas, a custo zero: presente, a
+requisição chegou ao serviço e foi ele quem recusou; ausente, morreu no gateway. Esta
+verificação cobre o que nenhuma das outras alcança — `aud`, validação de assinatura contra o
+JWKS, e o discovery sendo lido pelo authorizer em vez de por você.
 
 A partir daqui a plataforma existe, e toda sessão seguinte usa o
 [runbook-sessao.md](runbook-sessao.md).
@@ -256,6 +304,17 @@ A partir daqui a plataforma existe, e toda sessão seguinte usa o
 Só se a primeira sessão for do perfil Saga. O procedimento é o mesmo da abertura de rotina —
 ver [Abertura](runbook-sessao.md#abertura), passos 1, 5, 6 e 7 — e a ordem obrigatória vale
 igual: **a fila antes do mapeamento de origem**.
+
+**Antes do apply de lá, empacote a função.** O `terraform.tfvars` do repositório da função
+aponta `package_path` para `publish/function.zip`, e esse diretório é **saída de build,
+ignorada pelo controle de versão**. Num clone novo — que é a premissa deste documento — o
+arquivo não existe, e o plano não fecha. Máquina que já rodou uma sessão tem o pacote de antes
+e mascara a lacuna.
+
+```bash
+# no repositorio da funcao
+dotnet lambda package -pl src/Fcg.Notifications.Fn -o publish/function.zip -c Release
+```
 
 O root da função consome dois valores: o nome do broker (output do root de sessão) e o
 identificador do segredo da credencial. O segredo é **permanente** — ele nasce no root da
