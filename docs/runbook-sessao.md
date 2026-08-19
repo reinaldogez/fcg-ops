@@ -525,8 +525,9 @@ Primeiro, sempre: o mapeamento de origem aponta para o broker, e destruir o brok
 mapeamento órfão. A função e o mapeamento estão entre os **proibidos entre sessões** — se
 sobrarem, o inventário do passo 4 sai `exit 1`.
 
-Sai `7 destroyed` em menos de meio minuto — a destruição é muito mais rápida que a criação, e os
-mapeamentos que levaram minutos para nascer somem em segundos.
+Sai `8 destroyed` em cerca de um minuto — casando com o `8 to add` da abertura. A destruição é
+muito mais rápida que a criação, e os mapeamentos que levaram minutos para nascer somem em
+segundos.
 
 **2. Root de sessão** (só perfil Saga):
 
@@ -534,8 +535,14 @@ mapeamentos que levaram minutos para nascer somem em segundos.
 terraform -chdir=terraform/session destroy
 ```
 
-Leva ~13 minutos e sai `13 destroyed`, casando com o `13 to add` da abertura. O tempo é
-dominado pelos endpoints de interface, não pelo broker.
+Leva **~20 minutos** e sai `13 destroyed`, casando com o `13 to add` da abertura — medido em
+20m44s. O tempo é dominado pelo **grupo de segurança do broker**, que só some depois que as
+interfaces de rede anexadas a ele são liberadas: uma medição atribuiu **19m41s a esse único
+recurso**, com todo o resto saindo em segundos.
+
+**Não interrompa.** Um destroy parado por vinte minutos numa linha só parece pendurado e não
+está — e interromper ali é justamente como se deixa **grupo de segurança órfão**, que é o
+recurso que o gate abaixo não conta.
 
 **3. Parar a instância — nunca terminar:**
 
