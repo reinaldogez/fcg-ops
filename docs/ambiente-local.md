@@ -25,6 +25,7 @@ model) e a stack de observabilidade (Loki, Tempo, Prometheus, Grafana, OTel Coll
 - [Diagnóstico](#diagnóstico)
 - [Encerrar o ambiente](#encerrar-o-ambiente)
 - [Topologia](#topologia)
+- [Como era na Fase 2](#como-era-na-fase-2)
 
 ---
 
@@ -253,8 +254,7 @@ Para o perfil de nuvem, o mesmo script com o perfil trocado:
 FCG_PERFIL=ec2 bash scripts/init-secrets.sh
 ```
 
-<details>
-<summary>Alternativa manual, sem o script</summary>
+#### Alternativa manual, sem o script
 
 Copie cada template e preencha os placeholders à mão:
 
@@ -284,8 +284,6 @@ kubectl create secret generic identity-jwt -n fcg \
   --from-file=Jwt__RsaPrivateKeyPem=identity-rsa-private.pem \
   --from-literal=Jwt__KeyId=fcg-identity-key-1
 ```
-
-</details>
 
 ### Passo 4 — aplicar os manifestos
 
@@ -338,8 +336,7 @@ kubectl get jobs -n fcg
 
 O estado esperado é **todos os pods `Running` e `1/1`**, e os **três Jobs `Complete`**.
 
-<details>
-<summary>Aplicar com <code>kubectl</code> puro, sem o script</summary>
+#### Aplicar com `kubectl` puro, sem o script
 
 ```bash
 kubectl apply -f ./k8s/ -R
@@ -361,8 +358,6 @@ responder.
   defeito, mas polui o diagnóstico.
 
 Prefira o `apply-all.sh` para um boot limpo e ordenado.
-
-</details>
 
 ---
 
@@ -676,11 +671,96 @@ diagnóstico errado** — ele continua respondendo na porta depois que o cluster
 
 ### Fluxo de negócio
 
-> **Estado da Fase 2**, mantido aqui como marco de evolução do sistema. Retrata os quatro
-> serviços em coreografia quando o `notifications` ainda era um serviço in-cluster. Na Fase 3
-> ele foi descontinuado e sucedido por uma função serverless em repositório próprio, que **não
-> sobe nem no Compose nem no k3d** — por isso a perna de notificação dos diagramas abaixo não
-> tem correspondente no ambiente local.
+Os três serviços em coreografia, com o cache e o read model do catálogo dentro do cluster. A perna
+de notificação **sai** do cluster: quem a consome é uma função serverless que só existe na nuvem, e
+por isso as duas filas dela ficam sem consumidor no ambiente local — publicação sem consumo é o
+retrato correto aqui, não defeito.
+
+```mermaid
+flowchart LR
+  client([cliente / curl]) -->|POST /api/usuarios| api[identity-api]
+  client -->|POST /api/jogos · /api/pedidos| cat[catalog-api]
+
+  api --> sql[(SQL Server<br/>sqlserver-identity)]
+  api -->|UserCreatedEvent| mq[(RabbitMQ)]
+
+  cat --> pg[(PostgreSQL<br/>postgres-catalog)]
+  cat --> redis[(Redis<br/>cache do catálogo)]
+  cat --> ddb[(read model<br/>dynamodb-local)]
+  cat -.->|valida JWT · JWKS| api
+  cat -->|OrderPlacedEvent| mq
+
+  mq -->|order-placed.fcg-payments| pay[payments-api]
+  pay --> pgp[(PostgreSQL<br/>postgres-payments)]
+  pay -->|PaymentProcessedEvent| mq
+
+  mq -->|payment-processed.fcg-catalog| cat
+  mq -.->|filas sem consumidor no local| fn[AWS Lambda<br/>só existe na nuvem]
+```
+
+### Telemetria
+
+Os três serviços emitem os mesmos sinais pelos mesmos caminhos — logs por push direto no Loki,
+traces e métricas por OTLP no Collector:
+
+```mermaid
+flowchart LR
+  api[identity-api] -->|logs · push| loki[(Loki)]
+  cat[catalog-api] -->|logs · push| loki
+  pay[payments-api] -->|logs · push| loki
+
+  api -->|OTLP gRPC :4317| col[OTel Collector]
+  cat -->|OTLP gRPC :4317| col
+  pay -->|OTLP gRPC :4317| col
+
+  col -->|traces| tempo[(Tempo)]
+  col -->|/metrics :8889| prom[(Prometheus)]
+
+  loki --> graf[[Grafana]]
+  tempo --> graf
+  prom --> graf
+```
+
+- **Logs:** os três serviços fazem push direto no Loki (sink Serilog), cada um com seu label
+  (`app=fcg-identity`, `app=fcg-catalog` e `app=fcg-payments`) — o agregado `{app=~"fcg-.*"}` varre
+  os três.
+- **Traces e métricas:** os três exportam ambos pelo mesmo OTLP gRPC para o OTel Collector, que
+  roteia **traces → Tempo** e expõe **métricas em `:8889`** para o Prometheus fazer scrape (o
+  payments aparece como `Fcg.Payments.Api`, seu service name OTel).
+- **Auth cross-service:** o `catalog-api` é **resource server** — valida os tokens emitidos pelo
+  `identity-api` baixando o JWKS (`/.well-known/jwks.json`) direto do identity, sem OIDC discovery.
+  A aresta tracejada `catalog-api -.-> identity-api` do diagrama é dependência de **auth**, não de
+  dados.
+- **Saga de compra:** `POST /api/pedidos` publica `OrderPlacedEvent` na exchange `order-placed` → o
+  `payments-api` **consome** pela fila `order-placed.fcg-payments`, decide o pagamento pelo preço
+  (aprova se ≤ `Payment__RejectionThreshold`, padrão `5000`; rejeita acima) e **publica**
+  `PaymentProcessedEvent` na exchange `payment-processed` → o **catalog** consome por duas filas:
+  uma credita a biblioteca no aprovado e marca o pedido `Rejeitado` na recusa, a outra atualiza a
+  projeção. Coreografia pura — cada serviço reage a eventos, sem orquestrador central.
+- **Read model e cache:** a leitura da biblioteca vem da **projeção** no emulador, não do banco
+  relacional; e a leitura do catálogo consulta o **cache** antes do banco, com a escrita invalidando
+  o que estava guardado. Nenhum dos dois tem sintoma externo quando quebra — uma biblioteca servida
+  pelo lugar errado devolve resposta idêntica à correta —, e é por isso que a suíte de testes tem
+  uma camada que os observa de dentro do cluster.
+- **A perna de notificação está truncada por ambiente.** As exchanges `user-created` e
+  `payment-processed` registram publicação sem consumidor do lado das notificações, porque esse
+  consumidor é a função serverless. Localmente as filas dela sequer são criadas.
+- **UI única:** o Grafana lê os três backends, permitindo correlação clicável entre logs e traces —
+  inclusive cruzando serviços, já que o contexto de trace propaga do publish ao consume pelo header
+  da mensagem. Um pedido aprovado gera um **trace único atravessando a saga**: catalog (publish
+  `order-placed`) → payments (consume → processa → publish `payment-processed`) → catalog (credita a
+  biblioteca e atualiza a projeção).
+
+---
+
+## Como era na Fase 2
+
+> Esta seção **não** descreve o ambiente atual. Ela fica aqui para mostrar de onde o sistema veio,
+> e o diagrama abaixo é o da fase anterior, preservado como estava.
+
+Na Fase 2 a plataforma tinha **quatro** serviços dentro do cluster, e o de notificações era um
+deles: consumia `user-created` e `payment-processed` por filas próprias, disparava o e-mail e
+gravava no Redis a chave de idempotência com validade de 24h.
 
 ```mermaid
 flowchart LR
@@ -704,57 +784,16 @@ flowchart LR
   notif --> redis[(Redis<br/>idempotência)]
 ```
 
-### Telemetria
+Três coisas mudaram dali para a topologia do começo desta seção:
 
-Os quatro serviços emitem os mesmos sinais pelos mesmos caminhos — logs por push direto no
-Loki, traces e métricas por OTLP no Collector:
+- **O serviço de notificações saiu do cluster.** Foi sucedido por uma função serverless em
+  repositório próprio, acionada pelas mesmas filas — o papel é o mesmo, o lugar não. Por isso ele
+  não aparece em nenhum manifesto nem no Compose.
+- **O Redis trocou de dono.** Era a idempotência do serviço aposentado; hoje é o cache-aside do
+  catálogo. O controller continua sendo Deployment sobre volume efêmero, e pela mesma razão: o
+  estado é descartável nos dois papéis.
+- **Nasceram o read model e a borda.** A biblioteca passou a ser servida por uma projeção, e na
+  nuvem todo acesso externo passou a atravessar um gateway que valida o token antes de chegar ao
+  serviço.
 
-```mermaid
-flowchart LR
-  api[identity-api] -->|logs · push| loki[(Loki)]
-  cat[catalog-api] -->|logs · push| loki
-  pay[payments-api] -->|logs · push| loki
-  notif[notifications-api] -->|logs · push| loki
-
-  api -->|OTLP gRPC :4317| col[OTel Collector]
-  cat -->|OTLP gRPC :4317| col
-  pay -->|OTLP gRPC :4317| col
-  notif -->|OTLP gRPC :4317| col
-
-  col -->|traces| tempo[(Tempo)]
-  col -->|/metrics :8889| prom[(Prometheus)]
-
-  loki --> graf[[Grafana]]
-  tempo --> graf
-  prom --> graf
-```
-
-- **Logs:** os quatro serviços fazem push direto no Loki (sink Serilog), cada um com seu label
-  (`app=fcg-identity`, `app=fcg-notifications`, `app=fcg-catalog` e `app=fcg-payments`) — o
-  agregado `{app=~"fcg-.*"}` varre os quatro.
-- **Traces e métricas:** os quatro serviços exportam ambos pelo mesmo OTLP gRPC para o OTel
-  Collector, que roteia **traces → Tempo** e expõe **métricas em `:8889`** para o Prometheus
-  fazer scrape (o payments aparece como `Fcg.Payments.Api`, seu service name OTel).
-- **Auth cross-service:** o `catalog-api` é **resource server** — valida os tokens emitidos
-  pelo `identity-api` baixando o JWKS (`/.well-known/jwks.json`) direto do identity, sem OIDC
-  discovery. Issuer `fcg-identity`, Audience `fcg`. É a primeira integração de autenticação
-  entre serviços da plataforma: a aresta tracejada `catalog-api -.-> identity-api` do diagrama
-  é dependência de **auth**, não de dados.
-- **Saga de compra (completa):** `POST /api/pedidos` publica `OrderPlacedEvent` na exchange
-  `order-placed` → o `payments-api` **consome** pela fila `order-placed.fcg-payments`, decide
-  o pagamento pelo preço (aprova se ≤ `Payment:RejectionThreshold`, default `5000`; rejeita
-  acima) e **publica** `PaymentProcessedEvent` na exchange `payment-processed` → o **catalog**
-  consome (`payment-processed.fcg-catalog`: credita a biblioteca no aprovado; marca o pedido
-  `Rejeitado` na recusa) e o **notifications** consome (`payment-processed.fcg-notifications`:
-  e-mail de confirmação ou recusa). Coreografia pura — cada serviço reage a eventos, sem
-  orquestrador central.
-- **Fluxo cross-service:** a aresta `user-created` antes era publicada e **descartada** (fanout
-  sem fila bound — não havia consumidor). Agora o `notifications-api` a **consome** pela fila
-  `user-created.fcg-notifications`, dispara o e-mail de boas-vindas e grava no Redis a chave de
-  idempotência (TTL 24h, evita reenvio em reentrega). É o primeiro fluxo cross-service em
-  coreografia da plataforma.
-- **UI única:** o Grafana lê os três backends, permitindo correlação clicável entre logs e
-  traces — inclusive cruzando serviços, já que o contexto de trace propaga do publish ao
-  consume pelo header da mensagem. Um pedido aprovado gera um **trace único atravessando a
-  saga**: catalog (publish `order-placed`) → payments (consume → processa → publish
-  `payment-processed`) → catalog (credita a biblioteca) + notifications (e-mail).
+O repositório no estado daquela fase continua reproduzível: a tag `fase-2` o marca inteiro.
