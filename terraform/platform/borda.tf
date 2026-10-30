@@ -1,81 +1,3 @@
-# Namespace de descoberta privado. Resolve dentro da VPC e so la: o Cloud Map
-# nao fica no caminho do trafego -- ele responde "servico -> endereco:porta", e o
-# trafego flui direto das interfaces do VPC Link para a instancia.
-resource "aws_service_discovery_private_dns_namespace" "fcg" {
-  name        = "fcg.local"
-  description = "Namespace de descoberta dos servicos alcancaveis pelo gateway."
-  vpc         = aws_vpc.satelite.id
-}
-
-# Dois servicos, e nao tres: o de pagamentos nao tem registro aqui, do mesmo modo
-# que nao tem rota. A ausencia e estrutural nas duas camadas.
-resource "aws_service_discovery_service" "users" {
-  name         = "users"
-  namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-    dns_records {
-      type = "SRV"
-      ttl  = 60
-    }
-  }
-}
-
-resource "aws_service_discovery_service" "catalog" {
-  name         = "catalog"
-  namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-    dns_records {
-      type = "SRV"
-      ttl  = 60
-    }
-  }
-}
-
-# O registro aponta o endereco privado da instancia, e nao o fixo publico: o
-# trafego do gateway chega pelas interfaces do VPC Link, ja de dentro da VPC, e e
-# o endereco privado que as regras das portas de no aceitam.
-#
-# sem verificacao de saude: o registro e manual e o Cloud Map so resolve.
-resource "aws_service_discovery_instance" "users" {
-  instance_id = aws_instance.cluster.id
-  service_id  = aws_service_discovery_service.users.id
-
-  attributes = {
-    AWS_INSTANCE_IPV4 = aws_instance.cluster.private_ip
-    AWS_INSTANCE_PORT = "30081"
-  }
-}
-
-resource "aws_service_discovery_instance" "catalog" {
-  instance_id = aws_instance.cluster.id
-  service_id  = aws_service_discovery_service.catalog.id
-
-  attributes = {
-    AWS_INSTANCE_IPV4 = aws_instance.cluster.private_ip
-    AWS_INSTANCE_PORT = "30083"
-  }
-}
-
-# As duas sub-redes: e por isto que a rede declara duas em zonas distintas, e nao
-# por redundancia de instancia. O grupo de seguranca e o da propria instancia --
-# as interfaces nascem dentro da VPC e as regras das portas de no ja as aceitam
-# por origem, sem precisar de regra nova.
-resource "aws_apigatewayv2_vpc_link" "satelite" {
-  name               = "${var.name_prefix}vpc-link"
-  subnet_ids         = [for s in aws_subnet.publica : s.id]
-  security_group_ids = [aws_security_group.instancia.id]
-
-  tags = {
-    Name = "${var.name_prefix}vpc-link"
-  }
-}
-
 resource "aws_apigatewayv2_api" "fcg" {
   name          = "${var.name_prefix}api"
   description   = "Unica porta de entrada do sistema. Nao ha caminho de rede da internet ate os servicos fora daqui."
@@ -161,33 +83,6 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
   }
 }
 
-# Duas integracoes privadas, uma por servico de descoberta. O alvo e o servico do
-# Cloud Map, nao um endereco: e o que permite a instancia trocar de endereco sem
-# reescrever a integracao.
-resource "aws_apigatewayv2_integration" "users" {
-  api_id             = aws_apigatewayv2_api.fcg.id
-  integration_type   = "HTTP_PROXY"
-  integration_method = "ANY"
-  integration_uri    = aws_service_discovery_service.users.arn
-
-  connection_type = "VPC_LINK"
-  connection_id   = aws_apigatewayv2_vpc_link.satelite.id
-
-  payload_format_version = "1.0"
-}
-
-resource "aws_apigatewayv2_integration" "catalog" {
-  api_id             = aws_apigatewayv2_api.fcg.id
-  integration_type   = "HTTP_PROXY"
-  integration_method = "ANY"
-  integration_uri    = aws_service_discovery_service.catalog.arn
-
-  connection_type = "VPC_LINK"
-  connection_id   = aws_apigatewayv2_vpc_link.satelite.id
-
-  payload_format_version = "1.0"
-}
-
 # As onze rotas, exatamente estas. Tres abertas e oito com authorizer.
 #
 # Cada aparente anomalia da tabela e deliberada:
@@ -217,11 +112,6 @@ locals {
     "ANY /api/pedidos"             = { integracao = "catalog", autorizada = true }
     "ANY /api/pedidos/{proxy+}"    = { integracao = "catalog", autorizada = true }
     "ANY /api/biblioteca/{proxy+}" = { integracao = "catalog", autorizada = true }
-  }
-
-  integracoes = {
-    users   = aws_apigatewayv2_integration.users.id
-    catalog = aws_apigatewayv2_integration.catalog.id
   }
 }
 

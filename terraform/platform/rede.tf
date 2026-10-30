@@ -1,11 +1,11 @@
 # as zonas vem do provedor, e nao fixadas por letra: o mapeamento de letra para
 # zona fisica varia por conta, e zona nomeada sem capacidade faria a primeira
-# aplicacao falhar no lancamento da instancia.
+# aplicacao falhar no lancamento dos nos do cluster.
 data "aws_availability_zones" "disponiveis" {
   state = "available"
 
-  # exclui zonas locais e de operadora, que nao servem a VPC Link nem ao broker
-  # gerenciado.
+  # exclui zonas locais e de operadora, que nao servem a VPC Link, ao balanceador
+  # interno nem ao broker gerenciado.
   filter {
     name   = "opt-in-status"
     values = ["opt-in-not-required"]
@@ -15,8 +15,8 @@ data "aws_availability_zones" "disponiveis" {
 resource "aws_vpc" "satelite" {
   cidr_block = "10.0.0.0/16"
 
-  # nomes de dns habilitados porque o namespace de descoberta privado resolve
-  # dentro da VPC.
+  # nomes de dns habilitados porque o cluster gerenciado exige os dois na VPC dos
+  # nos, e os endpoints privados da sessao so resolvem por nome com eles.
   enable_dns_support   = true
   enable_dns_hostnames = true
 
@@ -33,9 +33,10 @@ resource "aws_internet_gateway" "satelite" {
   }
 }
 
-# duas sub-redes publicas, uma por zona: sao duas porque a VPC Link exige zonas
-# distintas, nao por alta disponibilidade. publicas porque nao ha NAT gateway --
-# ele cobraria 24/7 e a unica saida necessaria e a da propria instancia.
+# duas sub-redes publicas, uma por zona: sao duas porque a VPC Link e o
+# balanceador interno da borda exigem zonas distintas, nao por alta
+# disponibilidade. publicas porque nao ha NAT gateway -- ele cobraria 24/7 e a
+# unica saida necessaria e a dos proprios nos do cluster.
 #
 # o sufixo do nome e a letra local, e nao o nome da zona resolvida, para que
 # quem procure estas sub-redes por etiqueta nao precise saber o que o provedor
@@ -50,9 +51,9 @@ resource "aws_subnet" "publica" {
   cidr_block        = each.value.cidr
   availability_zone = data.aws_availability_zones.disponiveis.names[each.value.indice]
 
-  # o endereco publico automatico e o que faz a instancia alcancar a internet no
-  # primeiro boot, antes do endereco fixo ser associado; sem ele o dado de
-  # inicializacao morre no download do instalador e a maquina sobe sem cluster.
+  # o endereco publico automatico e o que da saida a internet aos nos do cluster
+  # sem NAT; sem ele o no nao puxa imagem nem se junta ao cluster, e o grupo de
+  # nos fica preso na criacao.
   map_public_ip_on_launch = true
 
   tags = {
