@@ -1,81 +1,3 @@
-# Namespace de descoberta privado. Resolve dentro da VPC e so la: o Cloud Map
-# nao fica no caminho do trafego -- ele responde "servico -> endereco:porta", e o
-# trafego flui direto das interfaces do VPC Link para a instancia.
-resource "aws_service_discovery_private_dns_namespace" "fcg" {
-  name        = "fcg.local"
-  description = "Namespace de descoberta dos servicos alcancaveis pelo gateway."
-  vpc         = aws_vpc.satelite.id
-}
-
-# Dois servicos, e nao tres: o de pagamentos nao tem registro aqui, do mesmo modo
-# que nao tem rota. A ausencia e estrutural nas duas camadas.
-resource "aws_service_discovery_service" "users" {
-  name         = "users"
-  namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-    dns_records {
-      type = "SRV"
-      ttl  = 60
-    }
-  }
-}
-
-resource "aws_service_discovery_service" "catalog" {
-  name         = "catalog"
-  namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.fcg.id
-
-    dns_records {
-      type = "SRV"
-      ttl  = 60
-    }
-  }
-}
-
-# O registro aponta o endereco privado da instancia, e nao o fixo publico: o
-# trafego do gateway chega pelas interfaces do VPC Link, ja de dentro da VPC, e e
-# o endereco privado que as regras das portas de no aceitam.
-#
-# sem verificacao de saude: o registro e manual e o Cloud Map so resolve.
-resource "aws_service_discovery_instance" "users" {
-  instance_id = aws_instance.cluster.id
-  service_id  = aws_service_discovery_service.users.id
-
-  attributes = {
-    AWS_INSTANCE_IPV4 = aws_instance.cluster.private_ip
-    AWS_INSTANCE_PORT = "30081"
-  }
-}
-
-resource "aws_service_discovery_instance" "catalog" {
-  instance_id = aws_instance.cluster.id
-  service_id  = aws_service_discovery_service.catalog.id
-
-  attributes = {
-    AWS_INSTANCE_IPV4 = aws_instance.cluster.private_ip
-    AWS_INSTANCE_PORT = "30083"
-  }
-}
-
-# As duas sub-redes: e por isto que a rede declara duas em zonas distintas, e nao
-# por redundancia de instancia. O grupo de seguranca e o da propria instancia --
-# as interfaces nascem dentro da VPC e as regras das portas de no ja as aceitam
-# por origem, sem precisar de regra nova.
-resource "aws_apigatewayv2_vpc_link" "satelite" {
-  name               = "${var.name_prefix}vpc-link"
-  subnet_ids         = [for s in aws_subnet.publica : s.id]
-  security_group_ids = [aws_security_group.instancia.id]
-
-  tags = {
-    Name = "${var.name_prefix}vpc-link"
-  }
-}
-
 resource "aws_apigatewayv2_api" "fcg" {
   name          = "${var.name_prefix}api"
   description   = "Unica porta de entrada do sistema. Nao ha caminho de rede da internet ate os servicos fora daqui."
@@ -92,8 +14,8 @@ resource "aws_apigatewayv2_api" "fcg" {
 #
 # A criacao do authorizer chama o /.well-known/openid-configuration deste issuer
 # e falha com 400 se ele nao responder. Como quem serve esse documento e o
-# identity atras da rota aberta, a plataforma nasce em duas fases: ver a variavel
-# authorizer_ligado.
+# identity atras da rota aberta, a plataforma nasce em duas fases: ver as
+# variaveis authorizer_ligado e verificar_discovery.
 locals {
   api_issuer = "https://${aws_apigatewayv2_api.fcg.id}.execute-api.${var.aws_region}.amazonaws.com"
 }
@@ -103,9 +25,9 @@ locals {
 # requisicao invalida com o apply pela metade.
 #
 # Bloco de verificacao, e nao pre-condicao: pre-condicao reprova o plano inteiro
-# enquanto o discovery nao responder, e ha aplicacao legitima nesse estado -- a
-# correcao do endereco de administracao entre as duas fases e exatamente isso.
-# Aviso informa sem impedir.
+# enquanto o discovery nao responder, e ha aplicacao legitima nesse estado --
+# qualquer mudanca da borda entre as duas fases e exatamente isso. Aviso informa
+# sem impedir.
 #
 # O segundo assert compara o emissor anunciado com o que o authorizer vai exigir:
 # a divergencia nao quebra apply nenhum, ela aparece como 401 com token valido em
@@ -116,17 +38,22 @@ locals {
 # "will be read during apply", e o codigo de saida detalhado passa a 2 mesmo sem
 # mudanca alguma. Fora, e lida no proprio plano e a convergencia se mantem.
 #
-# O try cobre o bootstrap: com o interruptor desligado a lista fica vazia, o
-# indice falha, e o valor de reserva faz os dois assert passarem calados.
+# A leitura tem interruptor proprio, separado do authorizer: com o authorizer de
+# pe o discovery ja foi provado, e le-lo em todo plano faria o plano falhar com o
+# cluster desligado, que e o estado normal entre sessoes. So a fase 2 de uma conta
+# nova liga a leitura.
+#
+# O try cobre o interruptor desligado: a lista fica vazia, o indice falha, e o
+# valor de reserva faz os dois assert passarem calados.
 data "http" "openid" {
-  count = var.authorizer_ligado ? 1 : 0
+  count = var.verificar_discovery ? 1 : 0
   url   = "${local.api_issuer}/.well-known/openid-configuration"
 }
 
 check "discovery_do_identity" {
   assert {
     condition     = try(data.http.openid[0].status_code, 200) == 200
-    error_message = "O documento de descoberta não respondeu 200 (status ${try(data.http.openid[0].status_code, 0)}). O authorizer não nasce assim: suba o cluster com o identity de pé antes, ou aplique com -var authorizer_ligado=false."
+    error_message = "O documento de descoberta não respondeu 200 (status ${try(data.http.openid[0].status_code, 0)}). O authorizer não nasce assim: suba o cluster com o identity de pé antes de aplicar com -var verificar_discovery=true."
   }
 
   assert {
@@ -156,34 +83,43 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
   }
 }
 
-# Duas integracoes privadas, uma por servico de descoberta. O alvo e o servico do
-# Cloud Map, nao um endereco: e o que permite a instancia trocar de endereco sem
-# reescrever a integracao.
-resource "aws_apigatewayv2_integration" "users" {
-  api_id             = aws_apigatewayv2_api.fcg.id
-  integration_type   = "HTTP_PROXY"
-  integration_method = "ANY"
-  integration_uri    = aws_service_discovery_service.users.arn
+# As duas sub-redes: e por isto que a rede declara duas em zonas distintas. O
+# grupo de seguranca e proprio do link, e so sai para o balanceador interno.
+#
+# Endereco novo de proposito, e nao o do link anterior: substituir no mesmo
+# endereco encadearia a destruicao do link com as rotas ainda apontando para as
+# integracoes antigas, e o apply morreria no meio.
+resource "aws_apigatewayv2_vpc_link" "borda" {
+  name               = "${var.name_prefix}vpc-link-borda"
+  subnet_ids         = [for s in aws_subnet.publica : s.id]
+  security_group_ids = [aws_security_group.vpc_link.id]
 
-  connection_type = "VPC_LINK"
-  connection_id   = aws_apigatewayv2_vpc_link.satelite.id
-
-  payload_format_version = "1.0"
+  tags = {
+    Name = "${var.name_prefix}vpc-link-borda"
+  }
 }
 
-resource "aws_apigatewayv2_integration" "catalog" {
+# Uma integracao so, para o listener do balanceador interno. O gateway nao sabe
+# qual servico atende qual caminho: entrega tudo ao controlador de entrada do
+# cluster, que despacha por prefixo.
+resource "aws_apigatewayv2_integration" "borda" {
   api_id             = aws_apigatewayv2_api.fcg.id
   integration_type   = "HTTP_PROXY"
   integration_method = "ANY"
-  integration_uri    = aws_service_discovery_service.catalog.arn
+  integration_uri    = aws_lb_listener.borda.arn
 
   connection_type = "VPC_LINK"
-  connection_id   = aws_apigatewayv2_vpc_link.satelite.id
+  connection_id   = aws_apigatewayv2_vpc_link.borda.id
 
   payload_format_version = "1.0"
 }
 
 # As onze rotas, exatamente estas. Tres abertas e oito com authorizer.
+#
+# A tabela e politica: diz se a rota existe e se exige JWT, e nada alem. Quem
+# despacha cada prefixo para o Service certo e o Ingress no cluster. Divergencia
+# entre as duas falha fechado: rota sem prefixo no Ingress chega ao controlador e
+# volta 404; prefixo no Ingress sem rota aqui e inalcancavel de fora.
 #
 # Cada aparente anomalia da tabela e deliberada:
 #
@@ -201,22 +137,17 @@ resource "aws_apigatewayv2_integration" "catalog" {
 # mesmo caminho, e a verificacao de prontidao publica os nomes das dependencias.
 locals {
   rotas = {
-    "POST /api/auth/{proxy+}"      = { integracao = "users", autorizada = false }
-    "POST /api/usuarios"           = { integracao = "users", autorizada = false }
-    "GET /.well-known/{proxy+}"    = { integracao = "users", autorizada = false }
-    "GET /api/usuarios"            = { integracao = "users", autorizada = true }
-    "ANY /api/usuarios/{proxy+}"   = { integracao = "users", autorizada = true }
-    "ANY /api/admin/{proxy+}"      = { integracao = "users", autorizada = true }
-    "ANY /api/jogos"               = { integracao = "catalog", autorizada = true }
-    "ANY /api/jogos/{proxy+}"      = { integracao = "catalog", autorizada = true }
-    "ANY /api/pedidos"             = { integracao = "catalog", autorizada = true }
-    "ANY /api/pedidos/{proxy+}"    = { integracao = "catalog", autorizada = true }
-    "ANY /api/biblioteca/{proxy+}" = { integracao = "catalog", autorizada = true }
-  }
-
-  integracoes = {
-    users   = aws_apigatewayv2_integration.users.id
-    catalog = aws_apigatewayv2_integration.catalog.id
+    "POST /api/auth/{proxy+}"      = { autorizada = false }
+    "POST /api/usuarios"           = { autorizada = false }
+    "GET /.well-known/{proxy+}"    = { autorizada = false }
+    "GET /api/usuarios"            = { autorizada = true }
+    "ANY /api/usuarios/{proxy+}"   = { autorizada = true }
+    "ANY /api/admin/{proxy+}"      = { autorizada = true }
+    "ANY /api/jogos"               = { autorizada = true }
+    "ANY /api/jogos/{proxy+}"      = { autorizada = true }
+    "ANY /api/pedidos"             = { autorizada = true }
+    "ANY /api/pedidos/{proxy+}"    = { autorizada = true }
+    "ANY /api/biblioteca/{proxy+}" = { autorizada = true }
   }
 }
 
@@ -229,7 +160,7 @@ resource "aws_apigatewayv2_route" "fcg" {
 
   api_id    = aws_apigatewayv2_api.fcg.id
   route_key = each.key
-  target    = "integrations/${local.integracoes[each.value.integracao]}"
+  target    = "integrations/${aws_apigatewayv2_integration.borda.id}"
 
   authorization_type = each.value.autorizada ? "JWT" : "NONE"
   authorizer_id      = each.value.autorizada ? aws_apigatewayv2_authorizer.jwt[0].id : null

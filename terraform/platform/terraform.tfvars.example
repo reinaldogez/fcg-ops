@@ -3,20 +3,18 @@ aws_region = "us-east-1"
 name_prefix     = "fcg-"
 broker_username = "fcg"
 
-# endereco do autor em notacao CIDR; /32 e um host unico. o valor abaixo vem do
-# bloco reservado a documentacao pela RFC 5737 e nao e roteavel.
-admin_cidr = "203.0.113.10/32"
-
-# conteudo da chave publica gerada fora do Terraform; a privada fica so na
-# maquina do autor. o exemplo esta truncado de proposito: copiado cru, ele falha
-# no registro do par de chaves em vez de registrar material invalido.
-chave_publica_ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... autor@maquina"
-
-# interruptor de bootstrap, de uso unico na vida da conta. a criacao do
-# authorizer chama o discovery do issuer, servido pelo identity atras da rota
-# aberta -- que so responde depois do cluster de pe. dai a ordem: aplicar uma vez
-# com falso, subir o cluster, e aplicar de novo no padrao.
+# interruptor da autenticacao de borda. a criacao do authorizer chama o
+# discovery do issuer, servido pelo identity atras da rota aberta -- que so
+# responde depois do cluster de pe. dai a ordem numa conta nova: aplicar uma vez
+# com falso, subir o cluster, e aplicar de novo no padrao. o outro uso do falso
+# e o plan -destroy final da borda.
 #
 # fica comentado de proposito: o padrao verdadeiro e o estado correto, e aplicar
 # com falso numa sessao comum derruba a autenticacao da borda.
 # authorizer_ligado = false
+
+# leitura do discovery antes de criar o authorizer, so na fase 2 de uma conta
+# nova: e ela que mostra a falta do discovery antes do apply quebrar no meio. em
+# qualquer outro plano a leitura falharia com o cluster desligado, que e o
+# estado normal entre sessoes.
+# verificar_discovery = true

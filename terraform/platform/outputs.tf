@@ -1,33 +1,8 @@
-output "dynamodb_table_name" {
-  description = "Nome da tabela do read model, o mesmo que o ConfigMap do catalog injeta."
-  value       = aws_dynamodb_table.biblioteca.name
-}
-
-output "dynamodb_table_arn" {
-  description = "ARN da tabela do read model."
-  value       = aws_dynamodb_table.biblioteca.arn
-}
-
 # so o ARN do segredo: quem precisa da credencial a le do gerenciador de segredos
-# pelo perfil de instancia. A senha nao sai deste root por output nenhum.
+# com a propria identidade. A senha nao sai deste root por output nenhum.
 output "broker_secret_arn" {
   description = "ARN do segredo com a credencial do broker. Entrada obrigatória do root da função serverless."
   value       = aws_secretsmanager_secret.broker.arn
-}
-
-output "instance_profile_name" {
-  description = "Nome do perfil de instância que carrega as permissões do cluster."
-  value       = aws_iam_instance_profile.instancia.name
-}
-
-output "instance_public_ip" {
-  description = "Endereço fixo do nó do cluster. É por ele que passam o acesso administrativo e os túneis da sessão."
-  value       = aws_eip.cluster.public_ip
-}
-
-output "instance_id" {
-  description = "Identificador da instância do cluster, alvo da parada e da partida de cada sessão."
-  value       = aws_instance.cluster.id
 }
 
 output "api_invoke_url" {
@@ -47,4 +22,35 @@ output "api_issuer" {
 output "api_id" {
   description = "Identificador da API HTTP, pelo qual o inventário casa o recurso sem depender do nome."
   value       = aws_apigatewayv2_api.fcg.id
+}
+
+output "tg_arn" {
+  description = "ARN do grupo de alvos do Traefik, consumido pelo TargetGroupBinding no cluster."
+  value       = aws_lb_target_group.traefik.arn
+}
+
+# o root de sessao le este valor para abrir a porta dos nos so para o
+# balanceador, sem que este root precise conhecer o grupo dos nos.
+output "nlb_security_group_id" {
+  description = "Grupo de segurança do balanceador interno, origem da regra de entrada nos nós do cluster."
+  value       = aws_security_group.nlb.id
+}
+
+output "ecr_repository_urls" {
+  description = "Endereço do repositório de imagem de cada serviço."
+  value       = { for k, r in aws_ecr_repository.servico : k => r.repository_url }
+}
+
+output "cd_role_arns" {
+  description = "ARN da role do CD de cada serviço; é o valor das variáveis do GitHub no pipeline."
+  value       = { for k, r in aws_iam_role.cd : k => r.arn }
+}
+
+output "pod_role_arns" {
+  description = "ARN das roles de Pod Identity, por componente, para as associações criadas com o cluster."
+  value = {
+    catalog = aws_iam_role.pod_catalog.arn
+    lbc     = aws_iam_role.pod_lbc.arn
+    ebs_csi = aws_iam_role.pod_ebs_csi.arn
+  }
 }
