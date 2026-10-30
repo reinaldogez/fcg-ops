@@ -23,3 +23,34 @@ output "api_id" {
   description = "Identificador da API HTTP, pelo qual o inventário casa o recurso sem depender do nome."
   value       = aws_apigatewayv2_api.fcg.id
 }
+
+output "tg_arn" {
+  description = "ARN do grupo de alvos do Traefik, consumido pelo TargetGroupBinding no cluster."
+  value       = aws_lb_target_group.traefik.arn
+}
+
+# o root de sessao le este valor para abrir a porta dos nos so para o
+# balanceador, sem que este root precise conhecer o grupo dos nos.
+output "nlb_security_group_id" {
+  description = "Grupo de segurança do balanceador interno, origem da regra de entrada nos nós do cluster."
+  value       = aws_security_group.nlb.id
+}
+
+output "ecr_repository_urls" {
+  description = "Endereço do repositório de imagem de cada serviço."
+  value       = { for k, r in aws_ecr_repository.servico : k => r.repository_url }
+}
+
+output "cd_role_arns" {
+  description = "ARN da role do CD de cada serviço; é o valor das variáveis do GitHub no pipeline."
+  value       = { for k, r in aws_iam_role.cd : k => r.arn }
+}
+
+output "pod_role_arns" {
+  description = "ARN das roles de Pod Identity, por componente, para as associações criadas com o cluster."
+  value = {
+    catalog = aws_iam_role.pod_catalog.arn
+    lbc     = aws_iam_role.pod_lbc.arn
+    ebs_csi = aws_iam_role.pod_ebs_csi.arn
+  }
+}
