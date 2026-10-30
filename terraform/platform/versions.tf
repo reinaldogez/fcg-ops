@@ -4,20 +4,20 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 6.0"
+      version = "= 6.69.1"
     }
 
     # gera a senha do broker; a senha vive no estado, que e local e nao versionado.
     random = {
       source  = "hashicorp/random"
-      version = ">= 3.0"
+      version = "= 3.9.0"
     }
 
     # le o documento de descoberta no bloco de verificacao da borda. nao cria
     # recurso nem entra no estado.
     http = {
       source  = "hashicorp/http"
-      version = ">= 3.0"
+      version = "= 3.6.3"
     }
   }
 

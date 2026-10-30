@@ -92,8 +92,8 @@ resource "aws_apigatewayv2_api" "fcg" {
 #
 # A criacao do authorizer chama o /.well-known/openid-configuration deste issuer
 # e falha com 400 se ele nao responder. Como quem serve esse documento e o
-# identity atras da rota aberta, a plataforma nasce em duas fases: ver a variavel
-# authorizer_ligado.
+# identity atras da rota aberta, a plataforma nasce em duas fases: ver as
+# variaveis authorizer_ligado e verificar_discovery.
 locals {
   api_issuer = "https://${aws_apigatewayv2_api.fcg.id}.execute-api.${var.aws_region}.amazonaws.com"
 }
@@ -103,9 +103,9 @@ locals {
 # requisicao invalida com o apply pela metade.
 #
 # Bloco de verificacao, e nao pre-condicao: pre-condicao reprova o plano inteiro
-# enquanto o discovery nao responder, e ha aplicacao legitima nesse estado -- a
-# correcao do endereco de administracao entre as duas fases e exatamente isso.
-# Aviso informa sem impedir.
+# enquanto o discovery nao responder, e ha aplicacao legitima nesse estado --
+# qualquer mudanca da borda entre as duas fases e exatamente isso. Aviso informa
+# sem impedir.
 #
 # O segundo assert compara o emissor anunciado com o que o authorizer vai exigir:
 # a divergencia nao quebra apply nenhum, ela aparece como 401 com token valido em
@@ -116,17 +116,22 @@ locals {
 # "will be read during apply", e o codigo de saida detalhado passa a 2 mesmo sem
 # mudanca alguma. Fora, e lida no proprio plano e a convergencia se mantem.
 #
-# O try cobre o bootstrap: com o interruptor desligado a lista fica vazia, o
-# indice falha, e o valor de reserva faz os dois assert passarem calados.
+# A leitura tem interruptor proprio, separado do authorizer: com o authorizer de
+# pe o discovery ja foi provado, e le-lo em todo plano faria o plano falhar com o
+# cluster desligado, que e o estado normal entre sessoes. So a fase 2 de uma conta
+# nova liga a leitura.
+#
+# O try cobre o interruptor desligado: a lista fica vazia, o indice falha, e o
+# valor de reserva faz os dois assert passarem calados.
 data "http" "openid" {
-  count = var.authorizer_ligado ? 1 : 0
+  count = var.verificar_discovery ? 1 : 0
   url   = "${local.api_issuer}/.well-known/openid-configuration"
 }
 
 check "discovery_do_identity" {
   assert {
     condition     = try(data.http.openid[0].status_code, 200) == 200
-    error_message = "O documento de descoberta não respondeu 200 (status ${try(data.http.openid[0].status_code, 0)}). O authorizer não nasce assim: suba o cluster com o identity de pé antes, ou aplique com -var authorizer_ligado=false."
+    error_message = "O documento de descoberta não respondeu 200 (status ${try(data.http.openid[0].status_code, 0)}). O authorizer não nasce assim: suba o cluster com o identity de pé antes de aplicar com -var verificar_discovery=true."
   }
 
   assert {

@@ -32,7 +32,13 @@ variable "chave_publica_ssh" {
 }
 
 variable "authorizer_ligado" {
-  description = "Interruptor de bootstrap da autenticação de borda. Falso apenas na primeira aplicação de uma conta nova, enquanto o discovery ainda não responde; o padrão verdadeiro é o estado estável, e é o que dispensa lembrar de religar a autenticação depois."
+  description = "Interruptor da autenticação de borda. Desligado só na fase 1 de uma conta nova, quando o discovery ainda não tem quem o sirva, e no plan -destroy final da borda; o padrão verdadeiro é o estado estável, e é o que dispensa lembrar de religar a autenticação depois."
   type        = bool
   default     = true
+}
+
+variable "verificar_discovery" {
+  description = "Liga a leitura do documento de descoberta do identity. Só na fase 2 de uma conta nova, enquanto o authorizer ainda não existe; em qualquer outro plan a leitura falharia com o cluster desligado."
+  type        = bool
+  default     = false
 }
