@@ -83,7 +83,43 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
   }
 }
 
+# As duas sub-redes: e por isto que a rede declara duas em zonas distintas. O
+# grupo de seguranca e proprio do link, e so sai para o balanceador interno.
+#
+# Endereco novo de proposito, e nao o do link anterior: substituir no mesmo
+# endereco encadearia a destruicao do link com as rotas ainda apontando para as
+# integracoes antigas, e o apply morreria no meio.
+resource "aws_apigatewayv2_vpc_link" "borda" {
+  name               = "${var.name_prefix}vpc-link-borda"
+  subnet_ids         = [for s in aws_subnet.publica : s.id]
+  security_group_ids = [aws_security_group.vpc_link.id]
+
+  tags = {
+    Name = "${var.name_prefix}vpc-link-borda"
+  }
+}
+
+# Uma integracao so, para o listener do balanceador interno. O gateway nao sabe
+# qual servico atende qual caminho: entrega tudo ao controlador de entrada do
+# cluster, que despacha por prefixo.
+resource "aws_apigatewayv2_integration" "borda" {
+  api_id             = aws_apigatewayv2_api.fcg.id
+  integration_type   = "HTTP_PROXY"
+  integration_method = "ANY"
+  integration_uri    = aws_lb_listener.borda.arn
+
+  connection_type = "VPC_LINK"
+  connection_id   = aws_apigatewayv2_vpc_link.borda.id
+
+  payload_format_version = "1.0"
+}
+
 # As onze rotas, exatamente estas. Tres abertas e oito com authorizer.
+#
+# A tabela e politica: diz se a rota existe e se exige JWT, e nada alem. Quem
+# despacha cada prefixo para o Service certo e o Ingress no cluster. Divergencia
+# entre as duas falha fechado: rota sem prefixo no Ingress chega ao controlador e
+# volta 404; prefixo no Ingress sem rota aqui e inalcancavel de fora.
 #
 # Cada aparente anomalia da tabela e deliberada:
 #
@@ -101,17 +137,17 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
 # mesmo caminho, e a verificacao de prontidao publica os nomes das dependencias.
 locals {
   rotas = {
-    "POST /api/auth/{proxy+}"      = { integracao = "users", autorizada = false }
-    "POST /api/usuarios"           = { integracao = "users", autorizada = false }
-    "GET /.well-known/{proxy+}"    = { integracao = "users", autorizada = false }
-    "GET /api/usuarios"            = { integracao = "users", autorizada = true }
-    "ANY /api/usuarios/{proxy+}"   = { integracao = "users", autorizada = true }
-    "ANY /api/admin/{proxy+}"      = { integracao = "users", autorizada = true }
-    "ANY /api/jogos"               = { integracao = "catalog", autorizada = true }
-    "ANY /api/jogos/{proxy+}"      = { integracao = "catalog", autorizada = true }
-    "ANY /api/pedidos"             = { integracao = "catalog", autorizada = true }
-    "ANY /api/pedidos/{proxy+}"    = { integracao = "catalog", autorizada = true }
-    "ANY /api/biblioteca/{proxy+}" = { integracao = "catalog", autorizada = true }
+    "POST /api/auth/{proxy+}"      = { autorizada = false }
+    "POST /api/usuarios"           = { autorizada = false }
+    "GET /.well-known/{proxy+}"    = { autorizada = false }
+    "GET /api/usuarios"            = { autorizada = true }
+    "ANY /api/usuarios/{proxy+}"   = { autorizada = true }
+    "ANY /api/admin/{proxy+}"      = { autorizada = true }
+    "ANY /api/jogos"               = { autorizada = true }
+    "ANY /api/jogos/{proxy+}"      = { autorizada = true }
+    "ANY /api/pedidos"             = { autorizada = true }
+    "ANY /api/pedidos/{proxy+}"    = { autorizada = true }
+    "ANY /api/biblioteca/{proxy+}" = { autorizada = true }
   }
 }
 
@@ -124,7 +160,7 @@ resource "aws_apigatewayv2_route" "fcg" {
 
   api_id    = aws_apigatewayv2_api.fcg.id
   route_key = each.key
-  target    = "integrations/${local.integracoes[each.value.integracao]}"
+  target    = "integrations/${aws_apigatewayv2_integration.borda.id}"
 
   authorization_type = each.value.autorizada ? "JWT" : "NONE"
   authorizer_id      = each.value.autorizada ? aws_apigatewayv2_authorizer.jwt[0].id : null
