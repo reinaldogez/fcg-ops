@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Confere o inventario do satelite na conta: o que tem de estar de pe continua de pe, e o
 # que e cobrado por hora nao sobrou ligado. Roda na abertura e no fechamento de toda sessao
-# de nuvem, e e a prova do fechamento -- parar a instancia e destruir o root de sessao sao
-# intencao; este comando e o que confirma.
+# de nuvem, e e a prova do fechamento -- destruir o root de sessao e intencao; este comando
+# e o que confirma.
 #
 # So le. Nao cria, nao altera e nao remove recurso nenhum: achar excedente e motivo de
 # relatorio e codigo de saida, nunca de limpeza automatica. A decisao de destruir e humana
@@ -65,7 +65,7 @@ aws_() {
 }
 
 # ---------------------------------------------------------------------------
-# consultas
+# consultas do permanente
 #
 # Cada funcao imprime uma linha por recurso encontrado, e nada quando nao encontra. O laco
 # de verificacao so conta linhas: quem sabe qual chamada faz o que e a tabela, nao o laco.
@@ -74,26 +74,6 @@ aws_() {
 # quando nao sobra linha, e sob 'set -e' uma ausencia legitima derrubaria o script. Falha da
 # chamada e caso diferente e nao passa por aqui -- morre no 'aws_', com a mensagem da API.
 # ---------------------------------------------------------------------------
-
-# A instancia e casada por etiqueta de nome e filtrada pelo estado esperado na propria
-# consulta: instancia rodando nao conta como encontrada, e cai como ausencia do permanente
-# em vez de passar despercebida. Terminada tambem nao conta -- o volume iria junto.
-q_instancia_parada() {
-  aws_ ec2 describe-instances \
-    --filters "Name=tag:Name,Values=${PREFIXO}cluster" \
-    "Name=instance-state-name,Values=stopped" \
-    --query 'Reservations[].Instances[].InstanceId' \
-    --output text | tr '\t' '\n' | grep -v '^$' || true
-}
-
-# O que interessa no endereco fixo e estar associado: um endereco alocado e solto cobra por
-# hora, entao a consulta exige o campo de associacao preenchido.
-q_ip_fixo_associado() {
-  aws_ ec2 describe-addresses \
-    --filters "Name=tag:Name,Values=${PREFIXO}ip-fixo" \
-    --query 'Addresses[?AssociationId!=null].AllocationId' \
-    --output text | tr '\t' '\n' | grep -v '^$' || true
-}
 
 q_api() {
   aws_ apigatewayv2 get-apis \
@@ -115,54 +95,38 @@ q_authorizer() {
     --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
+# A integracao tambem pende da API. Conta so as privadas: e uma, e todas as rotas apontam
+# para ela -- uma segunda seria resto de borda anterior.
+q_integracao() {
+  local api_id
+  api_id="$(q_api | head -n1)"
+  [[ -n "$api_id" ]] || return 0
+
+  aws_ apigatewayv2 get-integrations \
+    --api-id "$api_id" \
+    --query "Items[?ConnectionType=='VPC_LINK'].IntegrationId" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# O estado entra na consulta: link que falhou na criacao existe com o nome certo e nao
+# entrega nada, e o sintoma seria 503 no gateway com o cluster de pe.
 q_vpc_link() {
   aws_ apigatewayv2 get-vpc-links \
-    --query "Items[?Name=='${PREFIXO}vpc-link'].VpcLinkId" \
+    --query "Items[?Name=='${PREFIXO}vpc-link-borda' && VpcLinkStatus=='AVAILABLE'].VpcLinkId" \
     --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
-q_namespace() {
-  aws_ servicediscovery list-namespaces \
-    --query "Namespaces[?Name=='${NAMESPACE}'].Id" \
+# Sem '--names': com nome inexistente a chamada falha em vez de devolver vazio, e a falha
+# abortaria o inventario justamente no caso que ele precisa relatar.
+q_nlb() {
+  aws_ elbv2 describe-load-balancers \
+    --query "LoadBalancers[?LoadBalancerName=='${PREFIXO}nlb' && Scheme=='internal'].LoadBalancerArn" \
     --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
-# Os dois servicos de descoberta: 'users' e 'catalog'. Pagamentos nao tem registro aqui, do
-# mesmo modo que nao tem rota -- e a ausencia dele nao e excedente nem falta.
-q_servicos_descoberta() {
-  local ns_id
-  ns_id="$(q_namespace | head -n1)"
-  [[ -n "$ns_id" ]] || return 0
-
-  aws_ servicediscovery list-services \
-    --filters "Name=NAMESPACE_ID,Values=${ns_id},Condition=EQ" \
-    --query "Services[?Name=='users' || Name=='catalog'].Id" \
-    --output text | tr '\t' '\n' | grep -v '^$' || true
-}
-
-# Camada separada da anterior de proposito: o registro no Cloud Map sao dois recursos por
-# servico -- o nome no namespace e a instancia que carrega endereco e porta. Contar so os
-# servicos reportaria a borda saudavel com as registracoes ausentes, e o sintoma seria 503
-# no gateway com o cluster de pe.
-q_registros_descoberta() {
-  local svc_id
-  for svc_id in $(q_servicos_descoberta); do
-    aws_ servicediscovery list-instances \
-      --service-id "$svc_id" \
-      --query 'Instances[].Id' \
-      --output text | tr '\t' '\n' | grep -v '^$' || true
-  done
-}
-
-q_tabela_read_model() {
-  aws_ dynamodb list-tables \
-    --query "TableNames[?@=='${PREFIXO}biblioteca']" \
-    --output text | tr '\t' '\n' | grep -v '^$' || true
-}
-
-q_segredo_broker() {
-  aws_ secretsmanager list-secrets \
-    --query "SecretList[?Name=='${PREFIXO}broker-credencial'].ARN" \
+q_tg() {
+  aws_ elbv2 describe-target-groups \
+    --query "TargetGroups[?TargetGroupName=='${PREFIXO}traefik'].TargetGroupArn" \
     --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
@@ -176,6 +140,40 @@ q_log_gateway() {
     --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
+q_segredo_broker() {
+  aws_ secretsmanager list-secrets \
+    --query "SecretList[?Name=='${PREFIXO}broker-credencial'].ARN" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# A imutabilidade entra na consulta pelo mesmo motivo da retencao do grupo de log:
+# repositorio com tag mutavel tem o nome certo e deixa o cluster rodar imagem diferente da
+# que o pipeline publicou.
+q_repositorios() {
+  aws_ ecr describe-repositories \
+    --query "repositories[?imageTagMutability=='IMMUTABLE' && contains(['${PREFIXO}identity','${PREFIXO}catalog','${PREFIXO}payments'], repositoryName)].repositoryName" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# O provedor nao tem nome nem etiqueta pela qual casar: o ARN termina no endereco do emissor.
+q_oidc() {
+  aws_ iam list-open-id-connect-providers \
+    --query "OpenIDConnectProviderList[?ends_with(Arn,'/token.actions.githubusercontent.com')].Arn" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_roles_cd() {
+  aws_ iam list-roles \
+    --query "Roles[?starts_with(RoleName,'${PREFIXO}cd-')].RoleName" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_roles_pod() {
+  aws_ iam list-roles \
+    --query "Roles[?starts_with(RoleName,'${PREFIXO}pod-')].RoleName" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
 # ---------------------------------------------------------------------------
 # consultas do que nao pode existir
 #
@@ -184,11 +182,120 @@ q_log_gateway() {
 # procurados pelo prefixo de nome, e nao pela etiqueta de projeto, justamente porque nao ha
 # garantia de que o outro repositorio a aplique -- um inventario que so olhasse etiqueta
 # diria "limpo" com a funcao ligada.
+#
+# O mesmo vale para o que os controladores do cluster criam por conta propria: volumes de
+# PVC, grupos de seguranca e balanceadores do controlador nao estao em estado de Terraform
+# nenhum, e destruir o root de sessao nao os leva. Sao procurados pela marca que o proprio
+# controlador poe.
 # ---------------------------------------------------------------------------
+
+q_cluster() {
+  aws_ eks list-clusters \
+    --query "clusters[?starts_with(@,'${PREFIXO}')]" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# Os nos sao casados pela etiqueta que o grupo de nos gerenciado poe, e por qualquer estado
+# que ainda cobre volume: no parado nao cobra hora de computacao, mas o disco segue cobrando.
+q_nos() {
+  aws_ ec2 describe-instances \
+    --filters "Name=tag:eks:cluster-name,Values=${PREFIXO}eks" \
+    "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[].Instances[].InstanceId' \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# A maquina da fase anterior, em qualquer estado que nao seja terminada: parada ela ainda
+# cobra o volume, e nada mais a usa.
+q_instancia_f3() {
+  aws_ ec2 describe-instances \
+    --filters "Name=tag:Name,Values=${PREFIXO}cluster" \
+    "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+    --query 'Reservations[].Instances[].InstanceId' \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# Qualquer endereco alocado com a etiqueta do projeto: associado ou solto, cobra por hora,
+# e nada do permanente usa endereco fixo.
+q_ip_fixo() {
+  aws_ ec2 describe-addresses \
+    --filters "Name=tag:projeto,Values=fcg" \
+    --query 'Addresses[].AllocationId' \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_volumes_pvc() {
+  aws_ ec2 describe-volumes \
+    --filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=fcg" \
+    --query 'Volumes[].VolumeId' \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
 
 q_broker() {
   aws_ mq list-brokers \
     --query "BrokerSummaries[?starts_with(BrokerName, '${PREFIXO}')].BrokerId" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_dominio_busca() {
+  aws_ opensearch list-domain-names \
+    --query "DomainNames[?starts_with(DomainName,'${PREFIXO}')].DomainName" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_tabela_read_model() {
+  aws_ dynamodb list-tables \
+    --query "TableNames[?@=='${PREFIXO}biblioteca']" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# Toda outra tabela com o prefixo e a da funcao: a do read model tem linha propria, e as
+# duas nao podem ser contadas duas vezes.
+q_tabela_idempotencia() {
+  aws_ dynamodb list-tables \
+    --query "TableNames[?starts_with(@, '${PREFIXO}') && @!='${PREFIXO}biblioteca']" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# Endpoint em remocao ainda aparece por um tempo, e nao cobra mais: so os outros estados
+# contam.
+q_endpoints() {
+  aws_ ec2 describe-vpc-endpoints \
+    --filters "Name=tag:Name,Values=${PREFIXO}endpoint-*" \
+    --query "VpcEndpoints[?State!='deleted' && State!='Deleted'].VpcEndpointId" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_sgs_lbc() {
+  aws_ ec2 describe-security-groups \
+    --filters "Name=tag-key,Values=elbv2.k8s.aws/cluster" \
+    --query 'SecurityGroups[].GroupId' \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_lb_controller() {
+  aws_ elbv2 describe-load-balancers \
+    --query "LoadBalancers[?starts_with(LoadBalancerName,'k8s-')].LoadBalancerName" \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+# Os alvos pendem do grupo: sem grupo nao ha alvo, e a linha sai limpa. Com a sessao fechada
+# o grupo tem de estar vazio -- alvo registrado ali e ip de pod que ja nao existe, sinal de
+# que o binding nao saiu antes do cluster.
+q_alvos_tg() {
+  local tg_arn
+  tg_arn="$(q_tg | head -n1)"
+  [[ -n "$tg_arn" ]] || return 0
+
+  aws_ elbv2 describe-target-health \
+    --target-group-arn "$tg_arn" \
+    --query 'TargetHealthDescriptions[].Target.Id' \
+    --output text | tr '\t' '\n' | grep -v '^$' || true
+}
+
+q_namespace() {
+  aws_ servicediscovery list-namespaces \
+    --query "Namespaces[?Name=='${NAMESPACE}'].Id" \
     --output text | tr '\t' '\n' | grep -v '^$' || true
 }
 
@@ -210,14 +317,6 @@ q_mapeamento_origem() {
   done
 }
 
-# A tabela de idempotencia da funcao, distinta da tabela do read model: aquela e permanente
-# e esperada, esta so existe enquanto a funcao existe.
-q_tabela_idempotencia() {
-  aws_ dynamodb list-tables \
-    --query "TableNames[?starts_with(@, '${PREFIXO}') && @!='${PREFIXO}biblioteca']" \
-    --output text | tr '\t' '\n' | grep -v '^$' || true
-}
-
 # ---------------------------------------------------------------------------
 # o inventario declarado
 #
@@ -231,24 +330,37 @@ q_tabela_idempotencia() {
 # Tratar todas as linhas do mesmo jeito passaria na checagem de sintaxe e mentiria no
 # primeiro inventario, dando a sessao por fechada com o broker cobrando.
 #
-# O campo de quantidade e quantos se espera achar, e nao um minimo: dois servicos de
-# descoberta sao dois, e um terceiro seria tao errado quanto nenhum.
+# O campo de quantidade e quantos se espera achar, e nao um minimo: tres roles com o prefixo
+# sao tres, e uma quarta seria tao errada quanto nenhuma.
 INVENTARIO=(
-  "esperado|1|instancia do cluster, parada, com volume|q_instancia_parada"
-  "esperado|1|endereco IP fixo, associado|q_ip_fixo_associado"
   "esperado|1|API HTTP|q_api"
   "esperado|1|authorizer JWT|q_authorizer"
-  "esperado|1|VPC Link|q_vpc_link"
-  "esperado|1|namespace de descoberta|q_namespace"
-  "esperado|2|servicos de descoberta|q_servicos_descoberta"
-  "esperado|2|registros de descoberta|q_registros_descoberta"
-  "esperado|1|tabela do read model|q_tabela_read_model"
-  "esperado|1|segredo da credencial do broker|q_segredo_broker"
+  "esperado|1|integracao privada da borda|q_integracao"
+  "esperado|1|VPC Link da borda|q_vpc_link"
+  "esperado|1|NLB interno|q_nlb"
+  "esperado|1|target group do Traefik|q_tg"
   "esperado|1|grupo de log de acesso do gateway|q_log_gateway"
+  "esperado|1|segredo da credencial do broker|q_segredo_broker"
+  "esperado|3|repositorios de imagem imutaveis|q_repositorios"
+  "esperado|1|provedor OIDC do GitHub|q_oidc"
+  "esperado|3|roles do CD|q_roles_cd"
+  "esperado|3|roles de pod identity|q_roles_pod"
+  "proibido|0|cluster EKS|q_cluster"
+  "proibido|0|nos do cluster|q_nos"
+  "proibido|0|instancia da F3|q_instancia_f3"
+  "proibido|0|endereco IP fixo|q_ip_fixo"
+  "proibido|0|volumes de PVC do namespace fcg|q_volumes_pvc"
   "proibido|0|broker gerenciado|q_broker"
-  "proibido|0|mapeamento de origem de eventos|q_mapeamento_origem"
-  "proibido|0|funcao serverless|q_funcao"
+  "proibido|0|dominio de busca|q_dominio_busca"
+  "proibido|0|tabela do read model|q_tabela_read_model"
   "proibido|0|tabela de idempotencia da funcao|q_tabela_idempotencia"
+  "proibido|0|endpoints de VPC da sessao|q_endpoints"
+  "proibido|0|SGs do LB controller|q_sgs_lbc"
+  "proibido|0|LB criado pelo controller|q_lb_controller"
+  "proibido|0|alvos registrados no TG|q_alvos_tg"
+  "proibido|0|namespace de descoberta da F3|q_namespace"
+  "proibido|0|funcao serverless|q_funcao"
+  "proibido|0|mapeamento de origem de eventos|q_mapeamento_origem"
 )
 
 # ---------------------------------------------------------------------------
