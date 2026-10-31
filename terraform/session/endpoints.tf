@@ -7,7 +7,7 @@
 # servicos -- a plataforma de funcoes, o emissor de credencial temporaria e o
 # gerenciador de segredos, este ultimo porque a autenticacao do mapeamento e por
 # segredo. A sub-rede tem rota para o portao de internet, mas as interfaces do
-# mapeamento nascem SEM endereco publico, e portao de internet so serve quem tem um.
+# mapeamento nascem sem endereco publico, e portao de internet so serve quem tem um.
 # Sem estes endpoints o mapeamento fica habilitado e nao consome: o diagnostico vem
 # em LastProcessingResult, nunca em erro de apply.
 #
@@ -52,26 +52,6 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_https" {
   to_port                      = 443
 }
 
-# a instancia tambem precisa chegar aqui, e a razao e efeito colateral do nome privado
-# do endpoint: ele faz a VPC inteira resolver o nome publico do gerenciador de segredos
-# para o endereco privado do endpoint, e nao so as interfaces do mapeamento.
-# a instancia, que lia o segredo pela internet sem problema nenhum, passou a cair neste
-# grupo -- e sem esta regra ela e barrada. o sintoma e tempo de conexao esgotado no
-# broker-env.sh com o resto da saida da instancia saudavel, o que esconde a causa: o
-# procedimento de abertura de sessao quebra, e nada no plano ou no estado indica por que.
-#
-# a origem e o grupo do no do cluster, encontrado pelo mesmo dado que o grupo do broker
-# usa: o acoplamento entre os dois roots continua sendo a etiqueta de nome.
-resource "aws_vpc_security_group_ingress_rule" "endpoints_da_instancia" {
-  security_group_id = aws_security_group.endpoints.id
-  description       = "Chegada em 443 a partir do grupo do no do cluster, que le o segredo do broker."
-
-  referenced_security_group_id = data.aws_security_group.instancia.id
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-}
-
 # um endpoint por servico, todos na sub-rede do broker: e nela que o mapeamento cria
 # as interfaces, e endpoint em outra sub-rede nao seria alcancado. a sub-rede vem da
 # mesma consulta que o broker usa, entao as duas coisas nao podem divergir.
@@ -80,8 +60,11 @@ resource "aws_vpc_security_group_ingress_rule" "endpoints_da_instancia" {
 # o endereco privado do endpoint. desligado, o nome resolveria para o endereco
 # publico e o endpoint nao seria usado: endpoint criado, cobrado, e trafego passando
 # por fora. e o modo de falha silencioso desta pagina.
+#
+# so o perfil com funcao paga os tres endpoints por hora. o grupo e as regras ficam
+# sempre, porque nao cobram, e assim o resto do grafo nao muda com o perfil.
 resource "aws_vpc_endpoint" "mapeamento" {
-  for_each = local.servicos_do_mapeamento
+  for_each = var.funcao_ligada ? local.servicos_do_mapeamento : {}
 
   vpc_id            = data.aws_vpc.satelite.id
   service_name      = each.value
