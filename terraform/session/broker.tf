@@ -8,7 +8,7 @@ data "aws_vpc" "satelite" {
   }
 }
 
-# instancia unica ocupa exatamente uma sub-rede, entao a consulta casa a sub-rede
+# broker de no unico ocupa exatamente uma sub-rede, entao a consulta casa a sub-rede
 # de uma zona pelo nome, e nao o conjunto das duas. o conjunto passaria na
 # validacao, porque o argumento e um conjunto de textos, e seria recusado so no
 # apply -- onze minutos e meio depois, no pior lugar para descobrir isso.
@@ -42,8 +42,7 @@ locals {
 
 resource "aws_mq_broker" "sessao" {
   # o nome e estavel entre sessoes de proposito: e entrada obrigatoria do root da
-  # funcao serverless e a chave da descoberta pelo script de sessao. o prefixo
-  # tambem e o que faz o padrao de ARN da politica de instancia alcancar o broker.
+  # funcao serverless e a chave da descoberta pelo script de sessao.
   broker_name = "${var.name_prefix}broker"
 
   engine_type        = "RabbitMQ"
@@ -51,16 +50,17 @@ resource "aws_mq_broker" "sessao" {
   host_instance_type = "mq.m7g.medium"
   deployment_mode    = "SINGLE_INSTANCE"
 
-  # sem endereco publico: quem publica e a instancia, na mesma VPC, e o mapeamento
-  # de origem de eventos alcanca o broker pelas interfaces de rede da propria VPC.
+  # sem endereco publico: quem publica sao os pods do cluster, na mesma VPC, e o
+  # mapeamento de origem de eventos alcanca o broker pelas interfaces de rede da
+  # propria VPC.
   publicly_accessible = false
   subnet_ids          = data.aws_subnets.broker.ids
 
   # com grupo de seguranca proprio, declarado no seguranca.tf deste root. broker
-  # privado single-instance exige pelo menos um grupo, e omitir o argumento nao
+  # privado de no unico exige pelo menos um grupo, e omitir o argumento nao
   # deixa o broker sem postura: faz a plataforma escolher o grupo default da VPC,
-  # que autoriza entrada apenas a partir de si mesmo. como a instancia esta em
-  # outro grupo, o default recusaria justamente quem precisa publicar.
+  # que autoriza entrada apenas a partir de si mesmo. como os nos do cluster
+  # estao em outro grupo, o default recusaria justamente quem precisa publicar.
   #
   # o argumento e opcional e nao e calculado no esquema do provedor, entao a
   # escolha feita pela plataforma nunca voltaria para o estado: a omissao seria
