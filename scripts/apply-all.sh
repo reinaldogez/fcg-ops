@@ -101,6 +101,55 @@ if [[ "$missing" -ne 0 ]]; then
   exit 1
 fi
 
+# No eks a imagem de serviço é a do ECR presa ao commit da main de cada repositório.
+# Resolvê-la aqui, ainda na validação, faz imagem ausente falhar antes de qualquer apply.
+# As quatro linhas são conferidas uma a uma antes de exportar: a saída de outro script
+# nunca é executada como código.
+if [[ "$FCG_PERFIL" == "eks" && "$FASE_SERVICOS" -eq 1 ]]; then
+  if ! IMAGENS="$(bash scripts/imagens-da-main.sh)"; then
+    echo "erro: não consegui resolver as imagens da main (mensagem acima)." >&2
+    exit 1
+  fi
+  unset FCG_REGISTRY FCG_TAG_IDENTITY FCG_TAG_CATALOG FCG_TAG_PAYMENTS
+  while IFS= read -r linha; do
+    chave="${linha%%=*}"
+    valor="${linha#*=}"
+    case "$chave" in
+      FCG_REGISTRY)
+        [[ "$valor" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com$ ]] || { echo "erro: registro inválido vindo do imagens-da-main.sh: '$valor'" >&2; exit 1; }
+        ;;
+      FCG_TAG_IDENTITY|FCG_TAG_CATALOG|FCG_TAG_PAYMENTS)
+        [[ "$valor" =~ ^[0-9a-f]{40}$ ]] || { echo "erro: tag inválida para $chave vinda do imagens-da-main.sh: '$valor'" >&2; exit 1; }
+        ;;
+      *)
+        echo "erro: linha inesperada do imagens-da-main.sh: '$linha'" >&2
+        exit 1
+        ;;
+    esac
+    export "$chave=$valor"
+  done <<<"$IMAGENS"
+  for var in FCG_REGISTRY FCG_TAG_IDENTITY FCG_TAG_CATALOG FCG_TAG_PAYMENTS; do
+    if [[ -z "${!var:-}" ]]; then
+      echo "erro: o imagens-da-main.sh não devolveu $var." >&2
+      exit 1
+    fi
+  done
+  echo "imagens do eks: $FCG_REGISTRY, identity $FCG_TAG_IDENTITY, catalog $FCG_TAG_CATALOG, payments $FCG_TAG_PAYMENTS"
+fi
+
+# Aplica um manifest que contém imagem de serviço. No eks ele passa pelo filtro que troca
+# a imagem; o resultado é renderizado inteiro antes do apply, para que uma falha do
+# filtro nunca chegue ao kubectl como entrada vazia ou cortada.
+apply_servico() {
+  local f="$1" renderizado
+  if [[ "$FCG_PERFIL" == "eks" ]]; then
+    renderizado="$(bash scripts/imagem-eks.sh < "$f")"
+    printf '%s\n' "$renderizado" | kubectl apply -f -
+  else
+    kubectl apply -f "$f"
+  fi
+}
+
 # Aplica todos os .yaml de um diretório (recursivo), exceto os templates *.example.yaml.
 apply_dir() {
   local dir="$1"
@@ -162,10 +211,10 @@ if [[ "$FASE_SERVICOS" -eq 1 ]]; then
   kubectl apply -f "$ID/configmap-env.yaml"
   kubectl apply -f "$ID/secret.yaml"
   kubectl apply -f "$ID/secret-jwt.yaml"
-  kubectl apply -f "$ID/migrate-job.yaml"
+  apply_servico "$ID/migrate-job.yaml"
   echo "    aguardando migration concluir..."
   kubectl wait --for=condition=complete job/identity-migrate -n "$NS" --timeout="$TIMEOUT"
-  kubectl apply -f "$ID/deployment.yaml"
+  apply_servico "$ID/deployment.yaml"
   kubectl apply -f "$ID/service.yaml"
 
   echo "==> 03-services/catalog (Job de migration+seed antes do Deployment)"
@@ -175,10 +224,10 @@ if [[ "$FASE_SERVICOS" -eq 1 ]]; then
   kubectl apply -f "$CT/secret.yaml"
   # A conta de servico vem antes do Job: pod que cita conta inexistente nem e criado.
   kubectl apply -f "$CT/serviceaccount.yaml"
-  kubectl apply -f "$CT/migrate-job.yaml"
+  apply_servico "$CT/migrate-job.yaml"
   echo "    aguardando migration+seed concluir..."
   kubectl wait --for=condition=complete job/catalog-migrate -n "$NS" --timeout="$TIMEOUT"
-  kubectl apply -f "$CT/deployment.yaml"
+  apply_servico "$CT/deployment.yaml"
   kubectl apply -f "$CT/service.yaml"
 
   echo "==> 03-services/payments (Job de migration antes do Deployment)"
@@ -186,10 +235,10 @@ if [[ "$FASE_SERVICOS" -eq 1 ]]; then
   kubectl apply -f "$PY/configmap.yaml"
   kubectl apply -f "$PY/configmap-env.yaml"
   kubectl apply -f "$PY/secret.yaml"
-  kubectl apply -f "$PY/migrate-job.yaml"
+  apply_servico "$PY/migrate-job.yaml"
   echo "    aguardando migration concluir..."
   kubectl wait --for=condition=complete job/payments-migrate -n "$NS" --timeout="$TIMEOUT"
-  kubectl apply -f "$PY/deployment.yaml"
+  apply_servico "$PY/deployment.yaml"
   kubectl apply -f "$PY/service.yaml"
 
   echo "==> 04-borda (Ingress)"
