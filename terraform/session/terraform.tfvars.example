@@ -6,3 +6,7 @@ aws_region = "us-east-1"
 name_prefix = "fcg-"
 
 broker_engine_version = "3.13"
+
+# so o perfil com funcao serverless liga: os tres endpoints de interface do
+# mapeamento cobram por hora, e a sessao comum nao os usa.
+# funcao_ligada = true

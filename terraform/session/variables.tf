@@ -15,3 +15,9 @@ variable "broker_engine_version" {
   type        = string
   default     = "3.13"
 }
+
+variable "funcao_ligada" {
+  description = "Liga os endpoints de interface que o mapeamento de origem de eventos da função serverless exige. Só o perfil Base + função liga: os endpoints são cobrados por hora, e a sessão comum não tem função."
+  type        = bool
+  default     = false
+}
