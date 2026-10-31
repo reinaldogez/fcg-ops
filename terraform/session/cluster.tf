@@ -79,4 +79,41 @@ module "eks" {
       subnet_ids     = [data.aws_subnet.publica["a"].id]
     }
   }
+
+  # cada role do pipeline edita so o namespace da aplicacao. e o ponto de partida
+  # provado; a troca por um Role proprio do namespace, sem acesso a Secrets, vem
+  # depois do pipeline funcionar com esta.
+  access_entries = {
+    for k, role in data.aws_iam_role.cd : "cd-${k}" => {
+      principal_arn = role.arn
+      policy_associations = {
+        edicao = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+          access_scope = {
+            type       = "namespace"
+            namespaces = ["fcg"]
+          }
+        }
+      }
+    }
+  }
+}
+
+# so o catalog fala com a tabela do read model e com a busca. a associacao precisa
+# existir antes de o pod ser criado: as variaveis de credencial sao injetadas na
+# criacao do pod, e um pod anterior a ela fica sem credencial ate ser recriado.
+resource "aws_eks_pod_identity_association" "catalog" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "fcg"
+  service_account = "catalog"
+  role_arn        = data.aws_iam_role.pod["catalog"].arn
+}
+
+# o controller de balanceador registra os IPs dos pods do Traefik no target group
+# da borda, que nasce no root permanente.
+resource "aws_eks_pod_identity_association" "lbc" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "kube-system"
+  service_account = "aws-load-balancer-controller"
+  role_arn        = data.aws_iam_role.pod["lbc"].arn
 }
