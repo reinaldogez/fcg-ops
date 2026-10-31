@@ -1,0 +1,62 @@
+# O gateway decide quem pode entrar (a rota existe? exige token?); o Ingress so decide
+# qual Service atende. Prefixo sem rota no gateway e inalcancavel, e rota sem prefixo
+# aqui e 404. Payments nao tem prefixo (nao atende de fora) e /health tambem nao.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fcg
+  namespace: fcg
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /api/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: identity-api
+                port:
+                  number: 80
+          - path: /api/usuarios
+            pathType: Prefix
+            backend:
+              service:
+                name: identity-api
+                port:
+                  number: 80
+          - path: /api/admin
+            pathType: Prefix
+            backend:
+              service:
+                name: identity-api
+                port:
+                  number: 80
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: identity-api
+                port:
+                  number: 80
+          - path: /api/jogos
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog-api
+                port:
+                  number: 80
+          - path: /api/pedidos
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog-api
+                port:
+                  number: 80
+          - path: /api/biblioteca
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog-api
+                port:
+                  number: 80

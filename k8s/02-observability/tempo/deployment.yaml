@@ -16,6 +16,12 @@ spec:
       containers:
         - name: tempo
           image: grafana/tempo:latest
+          resources:
+            requests:
+              cpu: 25m
+              memory: 192Mi
+            limits:
+              memory: 512Mi
           args: ["-config.file=/etc/tempo/tempo.yaml"]
           ports:
             - name: otlp-grpc

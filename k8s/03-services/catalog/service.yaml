@@ -4,12 +4,10 @@ metadata:
   name: catalog-api
   namespace: fcg
 spec:
-  # NodePort com a porta declarada explicitamente: a borda da nuvem aponta para um
-  # numero fixo, e o alocado ao acaso mudaria a cada recriacao do Service.
-  type: NodePort
+  # Quem chega de fora e o Ingress; o Service so precisa ser alcancado de dentro.
+  type: ClusterIP
   selector:
     app: catalog-api
   ports:
     - port: 80
       targetPort: 8080
-      nodePort: 30083

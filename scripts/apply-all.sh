@@ -173,6 +173,8 @@ if [[ "$FASE_SERVICOS" -eq 1 ]]; then
   kubectl apply -f "$CT/configmap.yaml"
   kubectl apply -f "$CT/configmap-env.yaml"
   kubectl apply -f "$CT/secret.yaml"
+  # A conta de servico vem antes do Job: pod que cita conta inexistente nem e criado.
+  kubectl apply -f "$CT/serviceaccount.yaml"
   kubectl apply -f "$CT/migrate-job.yaml"
   echo "    aguardando migration+seed concluir..."
   kubectl wait --for=condition=complete job/catalog-migrate -n "$NS" --timeout="$TIMEOUT"
@@ -189,6 +191,9 @@ if [[ "$FASE_SERVICOS" -eq 1 ]]; then
   kubectl wait --for=condition=complete job/payments-migrate -n "$NS" --timeout="$TIMEOUT"
   kubectl apply -f "$PY/deployment.yaml"
   kubectl apply -f "$PY/service.yaml"
+
+  echo "==> 04-borda (Ingress)"
+  apply_dir "$K8S/04-borda"
 
   # O apply devolve assim que o objeto é aceito; sem esperar o rollout, o script
   # terminaria com sucesso e um serviço ainda em CrashLoop.

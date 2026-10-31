@@ -16,6 +16,12 @@ spec:
       containers:
         - name: loki
           image: grafana/loki:latest
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
           args: ["-config.file=/etc/loki/loki.yaml"]
           ports:
             - name: http

@@ -14,14 +14,29 @@ spec:
       labels:
         app: sqlserver-identity
     spec:
+      # O SQL Server roda como uid 10001 e o volume de bloco nasce com raiz de root; sem o
+      # grupo dono o processo nao escreve no proprio diretorio de dados. O storage local
+      # do k3d mascarava isso, porque nasce aberto para todos.
+      securityContext:
+        fsGroup: 10001
       containers:
         - name: sqlserver
           image: mcr.microsoft.com/mssql/server:2022-latest
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1152Mi
+            limits:
+              memory: 2Gi
           ports:
             - containerPort: 1433
           env:
             - name: ACCEPT_EULA
               value: "Y"
+            # Sem teto o SQL Server cresce ate ~80% da memoria que enxerga, que e a do no
+            # inteiro e nao o limite do conteiner.
+            - name: MSSQL_MEMORY_LIMIT_MB
+              value: "1536"
           envFrom:
             - secretRef:
                 name: sqlserver-identity-secret
