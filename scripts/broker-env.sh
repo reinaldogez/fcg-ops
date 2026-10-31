@@ -2,19 +2,20 @@
 set -euo pipefail
 
 # Descobre o broker gerenciado da sessão e escreve endereço, usuário e senha no .env local.
-# Roda NA INSTÂNCIA, não no laptop: a autenticação é o perfil de instância, que concede
-# exatamente as três chamadas usadas aqui (listagem, descrição e leitura do segredo).
+# Roda do laptop, com a credencial de operação: é ela que precisa das três chamadas
+# usadas aqui (listagem, descrição e leitura do segredo).
 # Apenas preenche o .env; não cria recurso, não aplica manifesto e não gera senha.
 # Idempotente: reexecutar reescreve as três chaves a partir do estado atual da nuvem.
 #
-# A senha nunca é impressa. O broker é procurado pelo NOME, que é estável entre sessões —
+# A senha nunca é impressa. O broker é procurado pelo nome, que é estável entre sessões —
 # o identificador muda a cada criação e não serve de chave de descoberta.
 
 # Perfil de ambiente, o mesmo seletor do apply-all.sh e do init-secrets.sh. Aqui o recuo
-# padrao e 'ec2': este script so roda na instancia, contra o broker gerenciado. Escrever o
+# padrao e 'eks': este script so serve a nuvem, contra o broker gerenciado. Escrever o
 # host do broker no arquivo do perfil errado nao da erro nenhum — o valor simplesmente nao
 # alcanca o cluster, e o sintoma aparece longe da causa.
-FCG_PERFIL="${FCG_PERFIL:-ec2}"
+FCG_PERFIL="${FCG_PERFIL:-eks}"
+if [[ "$FCG_PERFIL" == "ec2" ]]; then echo "erro: o perfil ec2 foi substituido por eks" >&2; exit 1; fi
 if [[ -z "${ENV_FILE:-}" ]]; then
   if [[ -f ".env.$FCG_PERFIL" ]]; then
     ENV_FILE=".env.$FCG_PERFIL"
