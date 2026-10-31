@@ -1,0 +1,8 @@
+# Com o readiness gate, o pod novo do Traefik so conta como pronto quando o NLB ja o ve
+# saudavel: o rollout nao derruba o antigo antes de o novo receber trafego.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+  labels:
+    elbv2.k8s.aws/pod-readiness-gate-inject: enabled

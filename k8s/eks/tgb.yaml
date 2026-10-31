@@ -1,0 +1,13 @@
+# Liga os pods do Traefik ao target group da borda, que o Terraform cria e mantem. O
+# ARN e renderizado pelo preparar-cluster-eks.sh no arquivo gerado, nunca escrito aqui.
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: traefik
+  namespace: traefik
+spec:
+  serviceRef:
+    name: traefik
+    port: web
+  targetType: ip
+  targetGroupARN: TG_ARN

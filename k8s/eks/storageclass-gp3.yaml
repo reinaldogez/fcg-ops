@@ -1,0 +1,15 @@
+# O EKS nao traz driver nem classe padrao: a gp2 in-tree que vem no cluster nao e
+# padrao, e PVC sem classe ficaria pendente. Esta e a classe que os StatefulSets usam.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  tagSpecification_1: "projeto=fcg"
+# o volume nasce na zona do no onde o pod foi agendado, e nao numa zona qualquer.
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete

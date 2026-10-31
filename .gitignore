@@ -8,7 +8,7 @@ obj/
 *.suo
 
 # Local environment (real values never committed). O sufixo e o perfil: .env.k3d e
-# .env.ec2 carregam senha real igual ao .env, entao a regra cobre a familia inteira.
+# .env.eks carregam senha real igual ao .env, entao a regra cobre a familia inteira.
 # A negacao preserva o template, que e o unico do conjunto que fica versionado.
 .env
 .env.*
@@ -43,6 +43,9 @@ terraform/plans/*
 
 # ConfigMaps gerados por script (valor que varia por ambiente)
 configmap-env.yaml
+
+# TargetGroupBinding renderizado com o ARN do target group da conta
+tgb.gerado.yaml
 
 # Artefatos da suite de testes: ambiente virtual, bytecode e caches de
 # ferramenta. Todos sao regenerados a partir dos arquivos versionados.

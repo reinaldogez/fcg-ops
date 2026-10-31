@@ -1,0 +1,17 @@
+# A chave e service.spec.type: service.type e ignorada sem erro e o Service nasceria
+# LoadBalancer, criando um balanceador fora do Terraform. Quem chega de fora e o NLB da
+# borda, que alcanca os pods direto pelo TargetGroupBinding.
+service:
+  spec:
+    type: ClusterIP
+deployment:
+  replicas: 2
+  # O pod antigo segue atendendo enquanto o NLB propaga o deregister; foi o que zerou os
+  # erros de rollout.
+  lifecycle:
+    preStop:
+      sleep:
+        seconds: 30
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
