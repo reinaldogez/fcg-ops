@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Resolve, para cada serviço, a imagem do ECR que corresponde ao commit atual da main do
 # repositório dele, e confere que ela existe. Roda do laptop, com a credencial de operação.
-# Saída padrão: exatamente quatro linhas CHAVE=valor, consumidas pelo apply-all.sh no
+# Saída padrão: exatamente quatro linhas FCG_<nome>=valor, consumidas pelo apply-all.sh no
 # perfil eks. Mensagens vão para a saída de erro.
 #
 # Imagem ausente é erro, nunca motivo para cair em outra: subir uma imagem que não é a da
