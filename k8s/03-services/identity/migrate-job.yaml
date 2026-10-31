@@ -14,7 +14,7 @@ spec:
         # POSTGRES_DB do Postgres) e o gate do migrate exige o banco existente antes de
         # rodar. O init cria o banco vazio, idempotente; o schema segue sendo do migrate.
         - name: wait-for-db
-          image: mcr.microsoft.com/mssql/server:2022-latest
+          image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
           envFrom:
             - secretRef:
                 name: sqlserver-identity-secret

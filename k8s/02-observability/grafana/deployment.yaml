@@ -16,6 +16,12 @@ spec:
       containers:
         - name: grafana
           image: grafana/grafana:13.0.2
+          resources:
+            requests:
+              cpu: 25m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
           envFrom:
             - secretRef:
                 name: grafana-secret

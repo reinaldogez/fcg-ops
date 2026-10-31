@@ -14,12 +14,13 @@ set -euo pipefail
 # As credenciais vêm do .env, preenchido pelo broker-env.sh. A senha só entra na
 # autenticação do curl: nenhuma linha daqui a imprime.
 
-# Perfil de ambiente, o mesmo seletor do broker-env.sh, e com o mesmo padrao 'ec2': os dois
-# formam um par e rodam na instancia, contra o broker gerenciado. Sem este recuo, o
+# Perfil de ambiente, o mesmo seletor do broker-env.sh, e com o mesmo padrao 'eks': os dois
+# formam um par e rodam do laptop, contra o broker gerenciado. Sem este recuo, o
 # broker-env.sh escreveria o endereco em .env.<perfil> e este script leria .env — a
 # topologia iria para o broker de outra sessao, ou nao seria criada. ENV_FILE explicito
 # continua vencendo, e quem tem so o .env nao percebe diferenca.
-FCG_PERFIL="${FCG_PERFIL:-ec2}"
+FCG_PERFIL="${FCG_PERFIL:-eks}"
+if [[ "$FCG_PERFIL" == "ec2" ]]; then echo "erro: o perfil ec2 foi substituido por eks" >&2; exit 1; fi
 if [[ -z "${ENV_FILE:-}" ]]; then
   if [[ -f ".env.$FCG_PERFIL" ]]; then
     ENV_FILE=".env.$FCG_PERFIL"
@@ -66,7 +67,7 @@ for pair in \
   fi
 done
 if [[ "$missing" -ne 0 ]]; then
-  echo "      rode antes, na instância: bash scripts/broker-env.sh" >&2
+  echo "      rode antes, do laptop: bash scripts/broker-env.sh" >&2
   exit 1
 fi
 

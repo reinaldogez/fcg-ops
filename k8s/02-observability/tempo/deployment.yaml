@@ -15,7 +15,14 @@ spec:
     spec:
       containers:
         - name: tempo
-          image: grafana/tempo:latest
+          # por digest: nenhuma tag de versao aponta para a imagem que o latest resolvia.
+          image: grafana/tempo@sha256:1ce31d6d7ffab62189685e8c47881d4a561c5d38bd0dbd66e40ca83cef07923d
+          resources:
+            requests:
+              cpu: 25m
+              memory: 192Mi
+            limits:
+              memory: 512Mi
           args: ["-config.file=/etc/tempo/tempo.yaml"]
           ports:
             - name: otlp-grpc

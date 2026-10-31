@@ -8,6 +8,7 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      serviceAccountName: catalog
       initContainers:
         - name: wait-for-postgres
           image: busybox:1.36

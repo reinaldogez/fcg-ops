@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Materializa, a partir de UMA fonte única (.env não-versionado) e da chave RSA da demo:
+# Materializa, a partir de uma fonte única (.env não-versionado) e da chave RSA da demo:
 # os Secrets reais do cluster e os ConfigMaps de ambiente (configmap-env.yaml), que
 # carregam o que varia entre k3d e a nuvem sem ser credencial. Deriva os valores
 # compartilhados (senha do SA, credenciais do Rabbit) de um lugar só, evitando
 # inconsistência entre arquivos.
 #
 # Os arquivos gerados (secret.yaml / secret-jwt.yaml / configmap-env.yaml) e o .env
-# NUNCA são versionados.
-# Este script NÃO inventa valores: lê o que você preencheu no .env. Idempotente — reexecutar
+# nunca são versionados.
+# Este script não inventa valores: lê o que você preencheu no .env. Idempotente — reexecutar
 # regenera os arquivos a partir do .env atual (a chave RSA existente é reaproveitada).
 
 # Perfil de ambiente, o mesmo seletor que o apply-all.sh usa. Cada perfil tem seu proprio
-# arquivo de valores (.env.k3d, .env.ec2), porque host, porta e TLS do broker diferem entre
+# arquivo de valores (.env.k3d, .env.eks), porque host, porta e TLS do broker diferem entre
 # eles: alternar editando um arquivo unico deixa o disco num estado meio a meio, com chave
 # de um ambiente e chave de outro. ENV_FILE explicito continua vencendo, e quem tem so o
 # .env antigo segue funcionando pelo recuo.
 FCG_PERFIL="${FCG_PERFIL:-k3d}"
+if [[ "$FCG_PERFIL" == "ec2" ]]; then echo "erro: o perfil ec2 foi substituido por eks" >&2; exit 1; fi
 if [[ -z "${ENV_FILE:-}" ]]; then
   if [[ -f ".env.$FCG_PERFIL" ]]; then
     ENV_FILE=".env.$FCG_PERFIL"
@@ -28,17 +29,17 @@ fi
 echo "perfil: $FCG_PERFIL — lendo valores de '$ENV_FILE'"
 
 # Guarda contra a divergencia silenciosa entre este script e o broker-env.sh. Os dois tem
-# padroes de perfil opostos — 'k3d' aqui, 'ec2' la, cada um pelo ambiente em que roda — e
+# padroes de perfil opostos — 'k3d' aqui, 'eks' la, cada um pelo ambiente que atende — e
 # os dois recuam para .env quando o arquivo do perfil nao existe. Enquanto o recuo vale
 # para ambos, eles operam no mesmo arquivo e tudo funciona. Mas se existir o arquivo de um
 # perfil e nao o do outro, um passa a ler .env.<perfil> enquanto o outro segue no .env: o
 # host do broker seria escrito num arquivo e lido de outro, sem erro nenhum, e o sintoma
 # apareceria como servico que nao conecta, longe da causa.
 if [[ "$ENV_FILE" == ".env" ]]; then
-  for outro in k3d ec2; do
+  for outro in k3d eks; do
     if [[ -f ".env.$outro" ]]; then
       echo "aviso: lendo '$ENV_FILE' (recuo), mas '.env.$outro' existe no disco." >&2
-      echo "       o broker-env.sh usa o perfil 'ec2' por padrao e escreve no arquivo dele;" >&2
+      echo "       o broker-env.sh usa o perfil 'eks' por padrao e escreve no arquivo dele;" >&2
       echo "       confira se os dois scripts estao lendo e escrevendo no mesmo arquivo." >&2
     fi
   done
@@ -354,7 +355,7 @@ echo "  $PAYMENTS_ENV"
 # O proximo passo depende de estar levantando o ambiente ou de estar so trocando um valor
 # numa sessao ja de pe: no segundo caso o apply-all reaplicaria os manifestos por cima do
 # que ja roda, e basta aplicar o que este script acabou de escrever.
-if [[ "$FCG_PERFIL" == "ec2" ]]; then
+if [[ "$FCG_PERFIL" == "eks" ]]; then
   echo "próximo passo:"
   echo "  cluster ja de pe  -> kubectl apply -f dos arquivos acima, depois"
   echo "                       kubectl rollout restart deployment -n fcg"

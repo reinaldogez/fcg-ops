@@ -15,7 +15,13 @@ spec:
     spec:
       containers:
         - name: otel-collector
-          image: otel/opentelemetry-collector-contrib:latest
+          image: otel/opentelemetry-collector-contrib:0.164.0
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
           args: ["--config=/etc/otelcol-contrib/config.yaml"]
           ports:
             - name: otlp-grpc
