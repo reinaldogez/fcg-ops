@@ -21,7 +21,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: sqlserver
-          image: mcr.microsoft.com/mssql/server:2022-latest
+          image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
           resources:
             requests:
               cpu: 100m
