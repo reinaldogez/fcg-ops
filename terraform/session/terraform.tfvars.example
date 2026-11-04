@@ -11,7 +11,8 @@ broker_engine_version = "3.13"
 # mapeamento cobram por hora, e a sessao comum nao os usa.
 # funcao_ligada = true
 
-# a policy de edicao do pipeline fica ligada ate a prova do Role proprio do
-# namespace. desligada, o pipeline entra so pelo grupo fcg-cd, e o RoleBinding
-# precisa estar aplicado antes do primeiro deploy, senao todo run recebe 403.
-# cd_politica_edicao = false
+# por padrao o pipeline entra so pelo grupo fcg-cd, pelo Role proprio do
+# namespace, e o RoleBinding precisa estar aplicado antes do primeiro deploy,
+# senao todo run recebe 403. ligar a policy de edicao e o fallback, se um run
+# der Forbidden por verbo que falta no Role; a abertura passa a ter 3 recursos a mais.
+# cd_politica_edicao = true
