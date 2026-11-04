@@ -10,3 +10,8 @@ broker_engine_version = "3.13"
 # so o perfil com funcao serverless liga: os tres endpoints de interface do
 # mapeamento cobram por hora, e a sessao comum nao os usa.
 # funcao_ligada = true
+
+# a policy de edicao do pipeline fica ligada ate a prova do Role proprio do
+# namespace. desligada, o pipeline entra so pelo grupo fcg-cd, e o RoleBinding
+# precisa estar aplicado antes do primeiro deploy, senao todo run recebe 403.
+# cd_politica_edicao = false

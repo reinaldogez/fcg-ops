@@ -21,3 +21,9 @@ variable "funcao_ligada" {
   type        = bool
   default     = false
 }
+
+variable "cd_politica_edicao" {
+  description = "Liga a policy gerenciada de edição no namespace da aplicação para as roles do pipeline de entrega. Desligada, o pipeline entra só pelo RBAC próprio do grupo fcg-cd, sem acesso a Secret."
+  type        = bool
+  default     = true
+}

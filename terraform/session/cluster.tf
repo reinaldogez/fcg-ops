@@ -80,13 +80,15 @@ module "eks" {
     }
   }
 
-  # cada role do pipeline edita so o namespace da aplicacao. e o ponto de partida
-  # provado; a troca por um Role proprio do namespace, sem acesso a Secrets, vem
-  # depois do pipeline funcionar com esta.
+  # cada role do pipeline entra no grupo fcg-cd, sempre: quem da as permissoes e o
+  # RoleBinding do namespace da aplicacao, sem acesso a Secret. a policy de edicao
+  # escopada ao namespace e o ponto de partida provado e sai depois da prova do
+  # Role proprio; o interruptor existe para desliga-la no meio de uma sessao aberta.
   access_entries = {
     for k, role in data.aws_iam_role.cd : "cd-${k}" => {
-      principal_arn = role.arn
-      policy_associations = {
+      principal_arn     = role.arn
+      kubernetes_groups = ["fcg-cd"]
+      policy_associations = var.cd_politica_edicao ? {
         edicao = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
           access_scope = {
@@ -94,7 +96,7 @@ module "eks" {
             namespaces = ["fcg"]
           }
         }
-      }
+      } : {}
     }
   }
 }
