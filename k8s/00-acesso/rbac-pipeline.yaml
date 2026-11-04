@@ -1,0 +1,50 @@
+# permissoes do pipeline de entrega no namespace da aplicacao. o pipeline troca a
+# imagem do Deployment, recria o Job de migration e acompanha o rollout, e nada mais:
+# nenhum acesso a Secret nem a ConfigMap, nenhum objeto fora deste namespace.
+#
+# o grupo fcg-cd vem da access entry da role federada de cada repositorio de servico;
+# quem da as permissoes e este RoleBinding, e nao uma policy gerenciada do cluster.
+#
+# risco residual aceito: quem cria Job no namespace pode montar um Secret num pod e
+# le-lo por dentro. recriar a migration exige criar Job, e o pipeline so roda a partir
+# do ramo principal de cada repositorio.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fcg-cd-deploy
+  namespace: fcg
+rules:
+  # trocar a imagem e um patch no Deployment; criar ou apagar Deployment nao e papel
+  # do pipeline.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  # o acompanhamento do rollout le os ReplicaSets do Deployment.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  # o template de Job e imutavel: a migration nova e um Job apagado e criado de novo.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # pods e log so para diagnosticar migration ou rollout que falhou, sem exec.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fcg-cd-deploy
+  namespace: fcg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fcg-cd-deploy
+subjects:
+  - kind: Group
+    name: fcg-cd
+    apiGroup: rbac.authorization.k8s.io
