@@ -161,6 +161,12 @@ if [[ "$FASE_BASE" -eq 1 ]]; then
   echo "==> namespace"
   kubectl apply -f "$K8S/00-namespace.yaml"
 
+  echo "==> 00-acesso (rbac do pipeline de entrega)"
+  # o Role e o RoleBinding do pipeline tem que existir antes dos Deployments em toda
+  # abertura: sem eles, numa sessao saudavel, o pipeline recebe 403. no k3d sao
+  # inocuos e mantem a estrutura igual nos dois perfis.
+  kubectl apply -f "$K8S/00-acesso/rbac-pipeline.yaml"
+
   echo "==> 01-infra (perfil: $FCG_PERFIL)"
   # Bancos, Redis e observabilidade sobem igual nos dois perfis. O broker e o emulador do
   # read model so existem no cluster local: na nuvem os dois sao servico gerenciado, e um
