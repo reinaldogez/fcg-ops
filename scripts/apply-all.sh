@@ -7,7 +7,8 @@ set -euo pipefail
 # Este script não gera segredos nem chaves — só aplica o que está em disco.
 #
 # Toda validação vem antes do primeiro apply, nesta ordem: perfil, fase, contexto do
-# kubectl, arquivos gerados. Qualquer uma que falhe encerra sem ter mexido no cluster.
+# kubectl, arquivos gerados, busca do eks, imagens do eks. Qualquer uma que falhe encerra
+# sem ter mexido no cluster.
 
 NS="fcg"
 K8S="k8s"
@@ -98,6 +99,20 @@ if [[ "$missing" -ne 0 ]]; then
   echo "  1) preencha os valores reais no arquivo do perfil (cp .env.example .env.$FCG_PERFIL, depois edite);" >&2
   echo "  2) materialize os arquivos com 'bash scripts/init-secrets.sh' (gera a chave RSA, os secret.yaml e os configmap-env.yaml)." >&2
   echo "  alternativa manual: copie cada *.example.yaml para o nome sem '.example' e preencha à mão." >&2
+  exit 1
+fi
+
+# Na nuvem, a fase de serviços exige a busca ligada no catalog-env. Sem a chave o catalog
+# sobe saudável e a busca responde 503: o rollout não denuncia nada, e o defeito só aparece
+# no uso. A barreira fica aqui, onde o erro ainda é barato. O perfil k3d não tem busca e
+# não é afetado.
+if [[ "$FCG_PERFIL" == "eks" && "$FASE_SERVICOS" -eq 1 ]] \
+  && ! grep -qE "^[[:space:]]+OpenSearch__Endpoint: 'https://" "$K8S/03-services/catalog/configmap-env.yaml"; then
+  echo "erro: o catalog-env do perfil eks não tem OpenSearch__Endpoint — a busca subiria desligada." >&2
+  echo "" >&2
+  echo "como resolver, depois de o apply do terraform/session terminar:" >&2
+  echo "  FCG_PERFIL=eks bash scripts/busca-env.sh" >&2
+  echo "  FCG_PERFIL=eks bash scripts/init-secrets.sh" >&2
   exit 1
 fi
 

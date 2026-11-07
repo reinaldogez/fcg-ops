@@ -46,4 +46,5 @@ addopts = "-ra --strict-markers"
 markers = [
     "saga: exercita a saga de compra ponta a ponta, com espera assincrona",
     "cache: observa o cache por dentro do cluster, e nao pela borda publica",
+    "busca: exercita a busca do catalogo, que so existe no ambiente com o indice de busca",
 ]

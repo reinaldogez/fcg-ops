@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: catalog-reindexar
+  namespace: fcg
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      # a conta de servico e a que carrega a identidade com acesso ao dominio de busca.
+      serviceAccountName: catalog
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z postgres-catalog 5432; do sleep 2; done']
+      containers:
+        - name: reindexar
+          image: ghcr.io/reinaldogez/fcg-catalog:latest
+          # --reindexar: reescreve o indice de busca a partir do relacional, pela mesma
+          # escrita versionada do consumer de eventos e sem apagar o indice. Remedio para
+          # queda do dominio no meio da sessao. Operacao sob demanda — este Job nao entra
+          # na subida automatica do cluster nem no pipeline.
+          command: ["dotnet", "Fcg.Catalog.Api.dll", "--reindexar"]
+          envFrom:
+            - configMapRef:
+                name: catalog-config
+            - configMapRef:
+                name: catalog-env
+            - secretRef:
+                name: catalog-secret
