@@ -85,6 +85,7 @@ RABBITMQ_USE_SSL="$(get_env RABBITMQ_USE_SSL)"
 JWT_ISSUER="$(get_env JWT_ISSUER)"
 JWT_PUBLIC_BASE_URL="$(get_env JWT_PUBLIC_BASE_URL)"
 DYNAMODB_SERVICE_URL="$(get_env DYNAMODB_SERVICE_URL)"
+OPENSEARCH_ENDPOINT="$(get_env OPENSEARCH_ENDPOINT)"
 
 # Pré-condição: nenhuma var obrigatória pode estar vazia. As duas que podem ser vazias
 # por natureza são cobradas logo abaixo, por outra regra.
@@ -112,18 +113,37 @@ for pair in \
   fi
 done
 
-# Duas variaveis sao legitimamente vazias em um dos ambientes — JWT_PUBLIC_BASE_URL em
-# k3d, DYNAMODB_SERVICE_URL na nuvem. Para elas a exigencia e a chave estar declarada no
-# arquivo, nao ter valor: assim o ambiente que nao a usa passa, mas um nome digitado
-# errado ainda falha em vez de virar string vazia em silencio.
-for key in JWT_PUBLIC_BASE_URL DYNAMODB_SERVICE_URL; do
+# Tres variaveis sao legitimamente vazias em um dos ambientes — JWT_PUBLIC_BASE_URL em
+# k3d, DYNAMODB_SERVICE_URL na nuvem, OPENSEARCH_ENDPOINT no k3d (vazia no local, onde nao
+# ha dominio de busca; preenchida na nuvem pelo busca-env.sh). Para elas a exigencia e a
+# chave estar declarada no arquivo, nao ter valor: assim o ambiente que nao a usa passa,
+# mas um nome digitado errado ainda falha em vez de virar string vazia em silencio.
+for key in JWT_PUBLIC_BASE_URL DYNAMODB_SERVICE_URL OPENSEARCH_ENDPOINT; do
   if ! grep -qE "^[[:space:]]*${key}=" "$ENV_FILE"; then
     echo "erro: variável obrigatória vazia ou ausente no $ENV_FILE: $key" >&2
     echo "      ela pode ficar vazia, mas precisa estar declarada." >&2
     missing=1
   fi
 done
+
+# Quando preenchido, o endpoint da busca tem uma forma so: o certificado do dominio cobre o
+# nome regional, e a requisicao assinada exige https. Conferir aqui, antes de escrever
+# qualquer arquivo, poupa descobrir o valor torto no boot do catalog ou na primeira busca.
+if [[ -n "$OPENSEARCH_ENDPOINT" \
+  && ! "$OPENSEARCH_ENDPOINT" =~ ^https://[a-z0-9.-]+\.us-east-1\.es\.amazonaws\.com$ ]]; then
+  echo "erro: OPENSEARCH_ENDPOINT fora da forma esperada no $ENV_FILE: '$OPENSEARCH_ENDPOINT'" >&2
+  echo "      esperado: https://<host>.us-east-1.es.amazonaws.com, sem barra final." >&2
+  echo "      o valor da nuvem e escrito por: FCG_PERFIL=eks bash scripts/busca-env.sh" >&2
+  missing=1
+fi
 [[ "$missing" -eq 0 ]] || exit 1
+
+# Na nuvem, endpoint vazio desliga a busca do catalog sem derrubar nada. Nao e erro aqui
+# porque a fase base da sessao roda este script antes de o dominio existir; quem barra a
+# fase de servicos sem busca e o apply-all.sh.
+if [[ "$FCG_PERFIL" == "eks" && -z "$OPENSEARCH_ENDPOINT" ]]; then
+  echo "aviso: busca desligada no catalog-env; antes da fase servicos rode o busca-env.sh e este script de novo." >&2
+fi
 
 # Aviso (não bloqueante) se valores ainda forem os placeholders do .example.
 case "$SA_PASSWORD$RABBIT_PASSWORD$ADMIN_PASSWORD$REDIS_PASSWORD$POSTGRES_CATALOG_PASSWORD$POSTGRES_PAYMENTS_PASSWORD" in
@@ -310,7 +330,19 @@ data:
   Jwt__PublicBaseUrl: '$(sq "$JWT_PUBLIC_BASE_URL")'
 EOF
 
-cat > "$CATALOG_ENV" <<EOF
+# A ausencia da chave e o que desliga a busca no catalog. Chave vazia teria o mesmo efeito,
+# mas a ausencia deixa o arquivo gerado do local igual ao de antes da busca existir. A
+# assinatura acompanha o endpoint porque so a nuvem tem dominio, e ele so aceita requisicao
+# assinada.
+CATALOG_BUSCA=""
+if [[ -n "$OPENSEARCH_ENDPOINT" ]]; then
+  CATALOG_BUSCA="  OpenSearch__Endpoint: '$(sq "$OPENSEARCH_ENDPOINT")'
+  OpenSearch__UseSigV4: 'true'
+"
+fi
+
+{
+  cat <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -323,6 +355,8 @@ data:
   Jwt__Issuer: '$(sq "$JWT_ISSUER")'
   DynamoDb__ServiceUrl: '$(sq "$DYNAMODB_SERVICE_URL")'
 EOF
+  printf '%s' "$CATALOG_BUSCA"
+} > "$CATALOG_ENV"
 
 cat > "$PAYMENTS_ENV" <<EOF
 apiVersion: v1

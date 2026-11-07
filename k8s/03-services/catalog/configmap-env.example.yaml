@@ -17,3 +17,9 @@ data:
   # Endpoint do emulador do read model no local; vazia na nuvem, onde o SDK resolve
   # o servico gerenciado pela regiao. Pode ficar vazia, mas precisa estar declarada.
   DynamoDb__ServiceUrl: ""
+  # Busca: as duas chaves existem so na nuvem. No local ficam ausentes, e a ausencia e o
+  # que desliga a busca no servico. O endpoint vem do output opensearch_endpoint do root
+  # session, com https:// na frente e sem barra final; o dominio so aceita requisicao
+  # assinada, por isso a assinatura acompanha o endpoint.
+  # OpenSearch__Endpoint: "REPLACE_ME"
+  # OpenSearch__UseSigV4: "true"
