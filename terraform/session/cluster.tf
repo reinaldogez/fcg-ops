@@ -82,8 +82,8 @@ module "eks" {
 
   # cada role do pipeline entra no grupo fcg-cd, sempre: quem da as permissoes e o
   # RoleBinding do namespace da aplicacao, sem acesso a Secret. a policy de edicao
-  # escopada ao namespace e o ponto de partida provado e sai depois da prova do
-  # Role proprio; o interruptor existe para desliga-la no meio de uma sessao aberta.
+  # escopada ao namespace e so o fallback, desligada por padrao: o Role proprio ja
+  # provou os verbos da entrega, e a policy so volta se faltar algum deles.
   access_entries = {
     for k, role in data.aws_iam_role.cd : "cd-${k}" => {
       principal_arn     = role.arn
