@@ -1,381 +1,323 @@
 # Levantar a plataforma do zero
 
-> **Uso único por plataforma.** Este documento levanta a plataforma numa conta virgem — ou a
-> relevanta depois de um `destroy` completo. **Sessão de rotina não repete isto** — para abrir
-> e fechar uma sessão com a plataforma já de pé, use o
-> [runbook-sessao.md](runbook-sessao.md).
+> **Uso único por conta.** Este documento levanta a plataforma permanente numa conta onde ela
+> não existe. **Sessão de rotina não repete nada daqui** — para abrir e fechar uma sessão com a
+> plataforma já de pé, use o [runbook de sessão](runbook-sessao.md).
 
-A distinção não é de conveniência. O passo 1 daqui aplica a borda **com a autenticação
-desligada**, e repeti-lo numa sessão comum derrubaria a autenticação da plataforma. Depois
-que a plataforma existe, o padrão já é o estado estável correto e o interruptor não se usa
-mais.
+A distinção não é de conveniência. O passo 1 daqui aplica a borda **sem o authorizer**, e
+repeti-lo numa conta que já tem a plataforma derrubaria a autenticação de todas as rotas
+protegidas. Depois que a plataforma existe, o padrão do Terraform já é o estado estável
+correto, e o interruptor não se usa mais.
 
 ## Sumário
 
-- [A ordem entre camadas](#a-ordem-entre-camadas)
-- [Por que duas fases](#por-que-duas-fases)
-- [Passo 1 — plataforma sem autenticação de borda](#passo-1--plataforma-sem-autenticação-de-borda)
-- [Passo 2 — a camada de workloads](#passo-2--a-camada-de-workloads)
-- [Passo 3 — plataforma no padrão](#passo-3--plataforma-no-padrão)
-- [Passo 4 — sessão e função](#passo-4--sessão-e-função)
+- [Quando usar](#quando-usar)
+- [A ordem entre camadas, e por que a borda nasce em duas fases](#a-ordem-entre-camadas-e-por-que-a-borda-nasce-em-duas-fases)
+- [Passo 1 — plataforma sem authorizer](#passo-1--plataforma-sem-authorizer)
+- [Passo 2 — primeira sessão](#passo-2--primeira-sessão)
+- [Passo 3 — authorizer e rotas protegidas](#passo-3--authorizer-e-rotas-protegidas)
+- [Passo 4 — plataforma no padrão](#passo-4--plataforma-no-padrão)
 - [A barra do endereço de teste](#a-barra-do-endereço-de-teste)
+- [Desmontar a plataforma](#desmontar-a-plataforma)
 - [Expectativa de tempo](#expectativa-de-tempo)
+- [Se algo não fechar](#se-algo-não-fechar)
 
 ---
 
-## A ordem entre camadas
+## Quando usar
 
-É aqui que o erro mora. A ordem não é preferência — cada passo depende de um efeito
-observável do anterior:
+Quando o inventário diz que falta a plataforma. Ele lista, peça por peça, o que tem de estar de
+pé entre sessões e o que não pode estar:
 
-```
-1. plataforma, interruptor desligado   → API, rede, instância, tabela, segredo
-2. cluster de pé                       → identity servindo o documento de discovery
-3. plataforma, padrão                  → authorizer e rotas protegidas
-4. sessão + função                     → broker, topologia, mapeamento
+```bash
+bash scripts/inventario-aws.sh; echo $?
 ```
 
-Aplicar o passo 3 antes do 2 falha com erro de requisição inválida na criação do authorizer, e
-o erro da nuvem não diz que falta o discovery. Hoje há uma rede de proteção antes dele: uma
-verificação no próprio root lê o documento de descoberta e, se ele não responder 200, emite
-aviso nomeando a causa. É **aviso**, não erro — o apply segue e ainda quebra —, mas o
-diagnóstico vem de graça em vez de custar a sessão.
+`0` é a plataforma completa e nada cobrado por hora sobrando — use o runbook. `2` é peça do
+permanente faltando: numa conta nova saem todas as linhas `esperado` como `AUSENTE`, e é aqui
+que se começa. `1` é recurso de sessão sobrando, e não se resolve aqui: feche a sessão pelo
+runbook primeiro.
 
-## Por que duas fases
-
-A criação do authorizer **valida o endpoint de discovery**, não apenas o formato do emissor.
-E o discovery é servido pelo identity, que está atrás de uma rota do próprio gateway.
-
-O resultado é circular: as rotas só nascem depois do authorizer, no mesmo apply — então numa
-aplicação única o authorizer é criado quando ainda não existe rota que sirva o documento que
-ele precisa validar. **Não fecha em uma aplicação**, e nenhuma correção no serviço destrava,
-porque o problema é de ordem de criação.
-
-A saída é o interruptor `authorizer_ligado`. Com ele em falso, o authorizer não é criado e as
-rotas protegidas ficam de fora; com o cluster de pé e o discovery respondendo, o apply no
-padrão cria os dois.
-
-O caminho está provado nas duas direções, sem migração de estado nem substituição de recurso:
-desligar produziu `3 to add, 0 to change, 0 to destroy`; religar produziu
-`9 added, 0 changed, 0 destroyed`, e o `plan` seguinte saiu `No changes`.
+Antes do primeiro comando, confira [a máquina de quem
+administra](runbook-sessao.md#a-máquina-de-quem-administra): as ferramentas, a credencial de
+operação e as armadilhas do Git Bash.
 
 ---
 
-## Passo 1 — plataforma sem autenticação de borda
+## A ordem entre camadas, e por que a borda nasce em duas fases
 
-Antes do primeiro comando, confira
-[a máquina de quem administra](runbook-sessao.md#a-máquina-de-quem-administra) — ferramentas
-necessárias e as idiossincrasias do terminal. Uma delas produz **falso negativo no inventário
-deste passo**, e some com a saída que o documento diz para esperar.
+A plataforma tem duas camadas de Terraform. O `terraform/platform/` é **permanente**: rede,
+borda (API Gateway, VPC Link, NLB interno e o target group do Traefik), repositórios de imagem,
+a identidade federada do pipeline, as roles de workload e o segredo do broker. O
+`terraform/session/` é **efêmero**: nasce e morre a cada sessão, com o cluster, o broker, o
+domínio de busca e a tabela do read model. O `session/` lê o `platform/` por nome; nunca o
+contrário.
 
-Preencha o `terraform.tfvars` a partir do `terraform.tfvars.example`, com atenção ao
-`admin_cidr` — é o endereço `/32` da máquina que vai administrar, e ele caduca quando o
-provedor troca o IP.
+A ordem entre as duas não é preferência — cada passo depende de um efeito observável do
+anterior:
 
-```bash
-curl -s https://checkip.amazonaws.com
+```mermaid
+flowchart LR
+  p1[Passo 1<br/>platform sem authorizer] --> p2[Passo 2<br/>primeira sessão<br/>identity de pé]
+  p2 -->|discovery responde pelo endereço público| p3[Passo 3<br/>authorizer e<br/>8 rotas protegidas]
+  p3 --> p4[Passo 4<br/>plataforma no padrão]
+  p4 -.->|daqui em diante| rb[[runbook de sessão]]
 ```
 
-Use **este** serviço. Os refletores mais lembrados — `ifconfig.me` entre eles — são bloqueados
-por antivírus com filtro de rede, e o bloqueio não aparece: o `curl` volta **vazio com `exit 0`**,
-indistinguível de uma máquina sem endereço público. É o mesmo modo de falha do
-[comando que mente](runbook-sessao.md#a-conversão-de-caminho-do-msys-e-o-comando-que-mente), por
-outra causa.
+A criação do authorizer JWT **valida o documento de discovery do emissor** — não só o formato
+do endereço. E quem serve esse documento é o identity, atrás de uma rota aberta do próprio
+gateway, dentro de um cluster que só existe durante uma sessão. Numa conta nova não há cluster
+quando a borda nasce, e o authorizer não teria o que validar: a criação falha com erro de
+requisição inválida, que não diz que falta o discovery.
 
-```bash
-terraform -chdir=terraform/platform init
-terraform -chdir=terraform/platform apply -var authorizer_ligado=false
-```
+**Não fecha em uma aplicação**, e nenhuma correção no serviço destrava, porque o problema é de
+ordem de criação. A saída são dois interruptores do `platform/`:
 
-Sempre com `-chdir`: apply no root errado sai `exit 0` com `No changes` e nada criado.
-Revise o plano contra dimensão, exposição e ciclo de vida antes de confirmar.
-
-**Verificação:** as três rotas abertas existem e a lista de authorizers está **vazia**.
-
-```bash
-aws apigatewayv2 get-authorizers --api-id <id> --query 'Items'
-```
-
-Guarde os outputs. Dois deles diferem por uma barra final, e a distinção custa uma sessão:
-o valor de **emissor** (sem barra) é o que a configuração do cluster consome; o valor de
-**invocação** (com barra) é o endereço para chamar a API. Trocá-los produz 401 com token
-válido em toda rota protegida — e usar o de invocação para montar URL de teste produz um 404
-que parece defeito de integração e não é. Ver [a barra do endereço de
-teste](#a-barra-do-endereço-de-teste).
-
-O emissor não é valor de leitura: **ele entra no arquivo de perfil do cluster**, em duas
-chaves, antes do passo 2 começar.
-
-```bash
-grep -E 'JWT_ISSUER|JWT_PUBLIC_BASE_URL' .env.ec2
-```
-
-As duas têm de terminar no identificador da API que este passo acabou de criar. **Confira o
-conteúdo, não a presença** — as duas chaves falham de maneiras opostas, e só uma delas é
-visível:
-
-| Chave | Como vem do `.env.example` | O que engana |
+| Variável | Padrão | Quando muda |
 |---|---|---|
-| `JWT_PUBLIC_BASE_URL` | vazia | nada: a ausência denuncia sozinha |
-| `JWT_ISSUER` | `fcg-identity` | **parece preenchida** — mas não é URL, e o authorizer exige URL `https` com discovery resolvível |
+| `authorizer_ligado` | `true` | `false` só no passo 1 desta conta nova e no `plan -destroy` que desmonta a plataforma |
+| `verificar_discovery` | `false` | `true` só no passo 3: lê o discovery no plano e avisa, antes do apply, se ele não responde ou se o emissor diverge |
 
-O `grep` acima exibe um valor para `JWT_ISSUER` mesmo quando ele está errado. Ler a saída sem
-comparar com o emissor do passo 1 é o falso positivo mais barato de cometer neste documento, e
-o preço só chega no passo 3.
-
-Numa conta virgem as duas nascem do `.env.example` e se preenchem à mão — e ele **traz a folha
-de instruções junto**: cada variável carrega uma linha `# ec2:` dizendo o que pôr no perfil de
-nuvem, inclusive a advertência de usar `api_issuer` e não `api_invoke_url`. São dezoito
-variáveis; nenhuma precisa ser adivinhada.
-
-Num **relevantamento** o arquivo já existe, carregando o identificador da API anterior — e aí
-ele passa em toda pré-condição, o cluster sobe inteiro e serve o emissor de uma API que não
-existe mais. O passo 2 tem verificação para isso, mas o ciclo já foi gasto.
-
-Num relevantamento três coordenadas mudam, e cada uma tem um consumidor diferente:
-
-| Muda | Quem consome |
-|---|---|
-| identificador da API | `JWT_ISSUER` e `JWT_PUBLIC_BASE_URL` do `.env.ec2` |
-| endereço fixo | o `known_hosts` da máquina que administra |
-| sufixo do segredo | `broker_secret_arn` no root da função (passo 4) |
-
-Rode o inventário já aqui, sabendo que ele sai **`exit 2`** com **duas** peças ausentes: o
-authorizer, que só nasce no passo 3, e a instância — o gate conta instância **parada**, e ela
-está de pé. O objetivo não é o gate: é exercitar as consultas enquanto a sessão está barata.
-
-O `plan` deste passo emite um `Warning: Check block assertion known after apply`. É esperado e
-não indica nada: a verificação do discovery depende do identificador da API, que ainda não
-existe no momento do plano. Ele some no passo 3.
+O `verificar_discovery` tem interruptor próprio porque, entre sessões, o cluster não existe: ler
+o discovery em todo plano faria o plano falhar no estado normal da plataforma.
 
 ---
 
-## Passo 2 — a camada de workloads
+## Passo 1 — plataforma sem authorizer
 
-A instância nasce com o k3s do provisionamento inicial, e nada mais: **não tem `git`, não tem
-`docker`**.
-
-### Transferir o worktree
-
-Clonar não serve, mesmo que `git` fosse instalado: o clone não traria os Secrets
-materializados nem o arquivo de variáveis, que são não-versionados por construção.
-
-O endereço fixo é novo, então a máquina ainda não está no `known_hosts` e o SSH pede
-confirmação da impressão digital. Dentro do `tar | ssh` essa pergunta aparece no meio do
-fluxo — resolva antes, com uma conexão de teste, que de quebra confirma o cluster:
+Preencha o `terraform/platform/terraform.tfvars` a partir do `terraform.tfvars.example` (região,
+prefixo de nome e usuário do broker). O arquivo não é versionado. Os dois interruptores ficam
+comentados nele de propósito: o valor vem por `-var` neste passo e no passo 3, e o padrão vale
+em todo o resto.
 
 ```bash
-ssh ec2-user@<endereço-fixo> 'kubectl get nodes'
+terraform -chdir=terraform/platform init -input=false
+terraform -chdir=terraform/platform plan -input=false -var authorizer_ligado=false \
+  -out=../plans/platform-f1.tfplan
 ```
 
-O nó tem de sair `Ready`. Não é preciso `KUBECONFIG` nem `sudo`: o provisionamento deixa o
-arquivo de acesso ao cluster legível de propósito.
+Plano esperado:
 
-```bash
-tar --exclude=.git --exclude=.venv --exclude='.env*' --exclude='*.pem' \
-    --exclude=terraform -cz k8s scripts observability | \
-  ssh ec2-user@<endereço-fixo> 'mkdir -p ~/fcg-ops && tar -xz -C ~/fcg-ops'
+```
+Plan: 46 to add, 0 to change, 0 to destroy.
 ```
 
-Depois — e só depois — o arquivo de variáveis do perfil. **Worktree primeiro, arquivo de
-perfil depois** — o inverso faz um script escrever num arquivo enquanto outro lê de outro, sem
-erro nenhum.
+Revise o plano antes de aplicar — dimensão, exposição, ciclo de vida — e aplique **o plano
+salvo**, nunca com aprovação automática e nunca com `-target`:
 
 ```bash
-scp .env.ec2 ec2-user@<endereço-fixo>:~/fcg-ops/
+terraform -chdir=terraform/platform apply ../plans/platform-f1.tfplan
 ```
 
-A chave RSA de assinatura é **opcional**: o `init-secrets.sh` gera uma se não encontrar
-nenhuma, e numa plataforma recém-nascida não há token emitido que dependa da anterior.
-Transfira-a apenas se quiser manter válidos tokens emitidos antes.
+Sempre com `-chdir`: um `apply` no diretório errado sai `exit 0` com `No changes` e nada
+criado.
 
-### Materializar e aplicar
+O `plan` deste passo pode emitir `Warning: Check block assertion known after apply`. É esperado:
+a verificação do discovery depende do identificador da API, que ainda não existe no momento do
+plano. Com o `verificar_discovery` desligado ela passa calada depois do apply.
+
+**Verificação.** O inventário sai `2`, com **uma** linha `AUSENTE` — `authorizer JWT` — e
+nenhum `EXCEDENTE`:
 
 ```bash
-# na instância, em ~/fcg-ops
-FCG_PERFIL=ec2 ./scripts/init-secrets.sh
-FCG_PERFIL=ec2 ./scripts/apply-all.sh
+bash scripts/inventario-aws.sh; echo $?
 ```
 
-### Esperar os serviços — o script não espera
-
-O `apply-all.sh` espera bancos e Jobs de migration, **nunca os Deployments dos serviços**.
-Ele reporta `ok: manifestos aplicados` e sai `0` com serviço ainda em `0/1`. Medido nos dois
-ambientes, não só na nuvem.
-
-Acrescente a espera explícita:
+E a borda já responde, falhando fechado:
 
 ```bash
-kubectl wait --for=condition=ready pod -l app=identity-api -n fcg --timeout=600s
-kubectl wait --for=condition=ready pod -l app=catalog-api  -n fcg --timeout=600s
-kubectl wait --for=condition=ready pod -l app=payments-api -n fcg --timeout=600s
+API=$(terraform -chdir=terraform/platform output -raw api_issuer)
+curl -s -o /dev/null -w '%{http_code}\n' "$API/api/jogos"                       # 404
+curl -s -D - -o /dev/null "$API/.well-known/openid-configuration" | grep -iE '^(HTTP|server|apigw-requestid)'
 ```
 
-**Verificação do passo:** o documento de discovery responde 200 **pela URL do gateway**, com
-o emissor igual à URL do gateway.
+| Requisição | Resposta | Por quê |
+|---|---|---|
+| `GET /api/jogos` | `404` | as rotas protegidas ainda não existem; o gateway não acha rota |
+| `GET /.well-known/openid-configuration` | `503`, com `apigw-requestid` e **sem** `server` | a rota aberta existe, mas o NLB não tem alvo: não há cluster. O gateway responde por ele |
+| `GET /inexistente` | `404` | caminho não declarado morre no gateway |
 
-`API` recebe o valor de **emissor** — o sem barra final. É a única leitura que funciona aqui;
-com o de invocação estes dois comandos saem 404. Ver [a barra do endereço de
-teste](#a-barra-do-endereço-de-teste).
+Guarde o valor de `api_issuer`: é o **emissor** dos tokens e o endereço público da plataforma.
+O output vizinho, `api_invoke_url`, difere dele por uma barra final, e a troca custa caro — ver
+[a barra do endereço de teste](#a-barra-do-endereço-de-teste).
+
+**Os repositórios de imagem nascem vazios.** A abertura de sessão exige, no ECR, a imagem do
+commit atual da `main` de cada serviço, e não cai para outra se faltar. Numa conta nova há dois
+caminhos: um push na `main` de cada serviço, que o pipeline publica no ECR; ou
+`bash scripts/semear-ecr.sh`, que copia do GHCR para o ECR a imagem **do mesmo commit** —
+nunca outra. O runbook trata o segundo como [ferramenta de
+recuperação](runbook-sessao.md#imagens-a-da-main-ou-nenhuma).
+
+---
+
+## Passo 2 — primeira sessão
+
+Siga a [abertura do runbook](runbook-sessao.md#abertura) até a fase de serviços concluir, com
+duas diferenças que são só desta primeira vez:
+
+- o inventário de [antes de abrir](runbook-sessao.md#antes-de-abrir) sai `2`, com o
+  `authorizer JWT` ausente, em vez de `0` — é o estado esperado depois do passo 1;
+- a sessão verde ainda não passa: sem authorizer não há rota protegida, e o login só vira prova
+  depois do passo 3.
+
+O plano do `session/` é o mesmo de qualquer sessão — ele não depende do authorizer:
+
+```
+Plan: 53 to add, 0 to change, 0 to destroy.
+```
+
+O que este passo entrega é o identity de pé, servindo o discovery pelo endereço público.
+
+---
+
+## Passo 3 — authorizer e rotas protegidas
+
+Primeiro a conferência que o authorizer vai fazer, feita por você e de graça:
 
 ```bash
-API=<valor-de-emissor>
+API=$(terraform -chdir=terraform/platform output -raw api_issuer)
 curl -s "$API/.well-known/openid-configuration"
-curl -s -o /dev/null -w '%{http_code}\n' "$API/.well-known/jwks.json"
 ```
 
-São **duas** conferências, e a segunda é a que escapa: o status tem de ser 200 **e** o campo
-`issuer` do corpo tem de ser idêntico ao `$API`. Um cluster configurado com o emissor de uma
-API anterior responde 200 alegremente — o 200 sozinho não prova nada —, e quem morre disso é
-o passo 3, longe daqui.
+São **duas** conferências, e a segunda é a que escapa: o status tem de ser `200` **e** o campo
+`issuer` do corpo tem de ser **igual byte a byte** ao `$API`, sem barra final. Um cluster
+configurado com o emissor errado responde `200` alegremente — o `200` sozinho não prova nada —, e
+quem paga é o authorizer: ele nasce, e toda rota protegida recusa token válido com `401`.
 
-Emissor divergente se conserta na instância, sem refazer o passo 2. Corrija as duas chaves no
-`.env.ec2` da máquina que administra, reenvie o arquivo, e lá dentro:
+Com as duas conferências verdes, o plano com a leitura do discovery ligada:
 
 ```bash
-FCG_PERFIL=ec2 ./scripts/init-secrets.sh
-kubectl apply -f k8s/03-services/identity/configmap-env.yaml \
-              -f k8s/03-services/catalog/configmap-env.yaml \
-              -f k8s/03-services/payments/configmap-env.yaml
-kubectl rollout restart deployment -n fcg
-kubectl rollout status deployment/identity-api -n fcg
+terraform -chdir=terraform/platform plan -input=false -var verificar_discovery=true \
+  -out=../plans/platform-f2.tfplan
 ```
 
-O `apply` do meio não é opcional: o `init-secrets.sh` só escreve arquivos, e sem ele o
-`rollout restart` recria os pods montando o ConfigMap antigo do cluster.
+Plano esperado — o authorizer e as oito rotas protegidas, nada mais:
 
-Este é o teste antecipado do caminho privado: gateway → VPC Link → descoberta → porta de nó →
-identity é exatamente o percurso que a criação do authorizer vai fazer. Um **502** aqui se
-conserta **antes** de gastar um apply — e o conserto é mapeamento de parâmetro na integração,
-se o encaminhamento não preservar o caminho. Um **404**, porém, quase sempre é a barra, e não
-a integração.
+```
+Plan: 9 to add, 0 to change, 0 to destroy.
+```
+
+Os nove endereços são `aws_apigatewayv2_authorizer.jwt[0]` e oito `aws_apigatewayv2_route.fcg[...]`
+(as rotas `ANY /api/...` e `GET /api/usuarios`). Nenhum `replace`, nenhum outro endereço, e
+nenhum aviso do bloco `check` do discovery. Se o aviso aparecer, ele nomeia a causa — discovery
+fora do ar, ou emissor divergente — e o certo é **não aplicar**.
+
+```bash
+terraform -chdir=terraform/platform apply ../plans/platform-f2.tfplan
+terraform -chdir=terraform/platform plan -input=false -detailed-exitcode   # sai 0
+```
+
+O `plan` final, **sem `-var` nenhum**, sai `0`: é a prova de que o padrão descreve o estado
+estável, e de que nenhum interruptor precisa ser lembrado daqui em diante.
 
 ---
 
-## Passo 3 — plataforma no padrão
+## Passo 4 — plataforma no padrão
 
-Com o discovery respondendo, aplique sem o `-var`:
-
-```bash
-terraform -chdir=terraform/platform apply
-```
-
-**Verificação:**
-
-1. O apply conclui e o authorizer existe.
-2. `terraform -chdir=terraform/platform plan` logo depois **não acusa mudança** — é a prova
-   de que o padrão deixa o estado estável correto, e de que o interruptor não é mais
-   necessário em apply nenhum.
-3. `scripts/inventario-aws.sh` lista todo o permanente com `ok` **menos a instância**, e sai
-   `exit 2`. Isso é o certo aqui, e não falha: o gate conta instância **parada**, e neste ponto
-   ela está obrigatoriamente de pé — é ela que serve o discovery que o passo 3 acabou de
-   consumir. O inventário só é exigível em zero depois que o fechamento da sessão para a
-   máquina.
-4. Um token emitido pelo identity é **aceito** pela borda. As três primeiras verificações são
-   estruturais — provam que as peças existem, não que elas conversam:
+Volte ao runbook: [sessão verde](runbook-sessao.md#sessão-verde) — agora ela passa inteira — e
+[fechamento](runbook-sessao.md#fechamento). O último passo do fechamento é o inventário, e
+desta vez ele sai **`0`**:
 
 ```bash
-API=<valor-de-emissor>
-
-# sem token: 401 e SEM cabecalho Server -- morreu na borda, que e o correto
-curl -s -D - -o /dev/null "$API/api/jogos" | grep -iE '^(HTTP|server)'
-
-TOKEN=$(curl -s -X POST "$API/api/auth/login" -H 'Content-Type: application/json' \
-  -d '{"email":"admin@fcg.com","senha":"<ADMINSEED_PASSWORD>"}' \
-  | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-
-# com token: 200 e COM 'server: Kestrel' -- atravessou a borda e chegou no backend
-curl -s -D - -o /dev/null "$API/api/jogos" -H "Authorization: Bearer $TOKEN" \
-  | grep -iE '^(HTTP|server)'
+bash scripts/inventario-aws.sh; echo $?   # 0
 ```
 
-O cabeçalho `Server` é o que separa dois 401 de causas opostas, a custo zero: presente, a
-requisição chegou ao serviço e foi ele quem recusou; ausente, morreu no gateway. Esta
-verificação cobre o que nenhuma das outras alcança — `aud`, validação de assinatura contra o
-JWKS, e o discovery sendo lido pelo authorizer em vez de por você.
+É a primeira vez que isso acontece nesta conta: a plataforma está completa, com o authorizer, e
+nada cobrado por hora ficou de pé. Com a sessão ainda aberta o inventário não serve de prova —
+ele acusa como `EXCEDENTE` tudo o que é da sessão, que é exatamente o que deve estar de pé ali.
 
-A partir daqui a plataforma existe, e toda sessão seguinte usa o
-[runbook-sessao.md](runbook-sessao.md).
-
----
-
-## Passo 4 — sessão e função
-
-Só se a primeira sessão for do perfil Saga. O procedimento é o mesmo da abertura de rotina —
-ver [Abertura](runbook-sessao.md#abertura), passos 1, 5, 6 e 7 — e a ordem obrigatória vale
-igual: **a fila antes do mapeamento de origem**.
-
-**Antes do apply de lá, empacote a função.** O `terraform.tfvars` do repositório da função
-aponta `package_path` para `publish/function.zip`, e esse diretório é **saída de build,
-ignorada pelo controle de versão**. Num clone novo — que é a premissa deste documento — o
-arquivo não existe, e o plano não fecha. Máquina que já rodou uma sessão tem o pacote de antes
-e mascara a lacuna.
-
-```bash
-# no repositorio da funcao
-dotnet lambda package -pl src/Fcg.Notifications.Fn -o publish/function.zip -c Release
-```
-
-O root da função consome dois valores: o nome do broker (output do root de sessão) e o
-identificador do segredo da credencial. O segredo é **permanente** — ele nasce no root da
-plataforma e é o que mantém a credencial estável entre sessões. Seu identificador só muda se
-o próprio segredo for recriado — que é exatamente o caso aqui, porque o passo 1 acabou de
-criá-lo do zero.
-
-Atualize `broker_secret_arn` no `terraform.tfvars` do repositório da função com o ARN que o
-passo 1 devolveu. O sufixo aleatório muda a cada recriação do segredo, e o plano de lá não
-fecha com o antigo.
+Daqui em diante, só o runbook.
 
 ---
 
 ## A barra do endereço de teste
 
-Custa uma sessão e não parece o que é. O passo 1 devolve dois endereços que diferem por uma
-barra final, e o de **invocação** — o com barra — é o que se copia por instinto para montar
-URL de teste. Montada assim, a URL fica com barra dupla:
+O `platform/` devolve dois endereços que diferem por uma barra final: `api_issuer` (sem barra)
+e `api_invoke_url` (com barra). O de invocação é o que se copia por instinto para montar URL de
+teste, e a URL fica com barra dupla:
 
 ```
-https://<id>.execute-api.<região>.amazonaws.com//.well-known/openid-configuration
-                                               ↑↑
+https://<id>.execute-api.us-east-1.amazonaws.com//.well-known/openid-configuration
+                                                ↑↑
 ```
 
-**Medido: 404.** O mesmo caminho com uma barra só: **200**. O gateway casa rota por caminho
-literal, e `//.well-known/{proxy+}` não é `/.well-known/{proxy+}`.
+O gateway casa rota por caminho literal, e `//.well-known/{proxy+}` não é
+`/.well-known/{proxy+}`: a resposta é **404**, numa rota que existe. O diagnóstico natural é
+suspeitar da integração — que está certa. Antes disso, **conte as barras**.
 
-O que torna isso caro é o diagnóstico natural: 404 numa rota que existe parece defeito de
-encaminhamento, e manda investigar o mapeamento de parâmetro da integração — que está certo.
-Antes de suspeitar da integração, **conte as barras**.
+O mesmo erro no emissor é mais caro: um `JWT_ISSUER` com barra produz `401` com token válido em
+toda rota protegida. O `gerar-env.sh` recusa emissor terminado em `/` por isso.
 
-Regra prática: o valor de **emissor** (sem barra) serve para montar URL e para configurar o
-cluster; o de **invocação** (com barra) serve para colar no navegador, e nada mais.
+Regra prática: `api_issuer` serve para montar URL e para configurar o cluster; `api_invoke_url`
+serve para colar no navegador, e nada mais.
+
+---
+
+## Desmontar a plataforma
+
+> **Não exercido na Fase 4.** O procedimento abaixo segue do código e do que foi medido nos
+> experimentos que antecederam a fase, mas nunca rodou contra esta plataforma. Revise o plano
+> com mais cuidado do que de costume.
+
+1. **A sessão fechada antes.** O `session/` lê o `platform/` por nome — rede, roles, segredo —, e
+   destruir o permanente com a sessão de pé deixa o efêmero sem chão. Confira: inventário `0` e
+   `terraform -chdir=terraform/session state list` vazio.
+2. **O plano de destruição com o authorizer desligado:**
+
+   ```bash
+   terraform -chdir=terraform/platform plan -destroy -input=false \
+     -var authorizer_ligado=false -out=../plans/platform-destroy.tfplan
+   ```
+
+   O desligado é o estado em que a configuração da borda não depende de nada que o cluster
+   sirva. Foi medido, nos experimentos, que um `plan -destroy` com a leitura do discovery
+   amarrada ao authorizer falhava antes de gerar o plano, porque o discovery já não respondia
+   com o cluster fora. Hoje a leitura tem interruptor próprio, desligado por padrão; o
+   `authorizer_ligado=false` continua sendo a forma declarada para desmontar a borda.
+3. **Os repositórios de imagem recusam a remoção com imagem dentro.** O
+   `terraform/platform/registro.tf` declara `force_delete = false`, de propósito: um destroy
+   acidental do permanente não leva o histórico de imagens. Para desmontar de verdade, apague
+   as imagens de cada repositório antes (`aws ecr list-images` e `aws ecr batch-delete-image`),
+   ou aceite que o destroy pare nos repositórios e os trate depois.
+4. **Revise o plano e aplique o plano salvo:**
+
+   ```bash
+   terraform -chdir=terraform/platform apply ../plans/platform-destroy.tfplan
+   ```
+
+O segredo do broker é declarado sem janela de recuperação, então o nome fica livre na hora para
+uma plataforma nova.
 
 ---
 
 ## Expectativa de tempo
 
+Números medidos, cada um de uma execução:
+
 | Etapa | Medido |
 |---|---|
-| Passo 1 — plataforma sem borda | 3–5 min (uma medição: apply em 2m42s) |
-| Passo 2 — workloads num cluster recriado | **2–20 min**, ver abaixo |
-| Passo 3 — plataforma no padrão | 1–2 min (uma medição: apply em 40s) |
-| Passo 4 — broker nascendo | ~12 min |
+| Passo 1 — apply do `platform/` (46 recursos) | 3m19s, dominado por VPC Link (2m07s) e NLB (2m44s) |
+| Passo 2 — primeira sessão, do apply do `session/` ao primeiro login pela borda | 24m22s, com o passo 3 no meio |
+| Passo 3 — apply do authorizer e das 8 rotas | 17 s |
+| Desmontar a plataforma | não medido |
 
-O passo 2 é o que varia, e **os pulls de imagem são a variação** — não o banco. Duas medições
-do mesmo passo, ambas em cluster recriado e cache de nó frio, saíram muito distantes: uma
-gastou 20+ minutos, com a infraestrutura levando ~9 só para ficar pronta e uma única imagem
-consumindo quase 3 de download; outra fechou o `apply-all.sh` inteiro em **1m30s**, com os
-três serviços já `ready` quando as esperas explícitas rodaram. Planeje pelo pior caso, e não
-conclua que algo está errado quando vier o melhor.
-
-A diferença entre *recriar o cluster* e *reaplicar num cluster existente* é o cache de
-imagens do nó, e ela é grande. É por isso que o fechamento **para** a instância em vez de
-terminá-la: o volume guarda o cluster e as imagens.
+No passo 2 o caminho crítico é o cluster e os nós; o domínio de busca é o recurso mais lento da
+sessão (~15 min), mas fica fora do caminho do login. As sessões de rotina seguintes, já sem o
+passo 3, mediram 22m41s e 24m11s do zero ao primeiro login.
 
 ---
 
 ## Se algo não fechar
 
-A seção de [Diagnóstico](runbook-sessao.md#diagnóstico) do runbook de sessão cobre os
-sintomas medidos — emissor com barra, falso negativo do inventário, resolução de nome dentro
-da VPC, camada em que a resposta morreu, e as armadilhas de executar comando na instância.
-Ela vale igual aqui.
+A seção de [Diagnóstico](runbook-sessao.md#diagnóstico) do runbook de sessão cobre os sintomas
+medidos — `401` com token válido, em que camada a resposta morreu, comando que passa por não ter
+feito nada, contexto do `kubectl` apontando para cluster destruído. Ela vale igual aqui.
+
+Dois sinais específicos deste documento:
+
+- **Apply longo sem `Still creating`.** Recurso que demora (VPC Link, NLB, cluster, domínio)
+  imprime `Still creating...` a cada dez segundos. Se a linha some logo depois do `Creating...`,
+  a nuvem recusou o pedido e o Terraform está esperando à toa: consulte o CloudTrail em vez de
+  esperar.
+- **Aviso do `check` do discovery no passo 3.** É ele que impede o apply de quebrar pela
+  metade. Não aplique com o aviso; volte ao passo 2 e confira o emissor no discovery.
