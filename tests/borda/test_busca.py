@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import Jogo
 from fcg.cliente import ClienteApi, descreve, respondido_pelo_backend
 
 pytestmark = pytest.mark.busca
@@ -22,6 +23,11 @@ CAMINHO_BUSCA = "/api/jogos/search"
 # so a tolerancia a erro encontra o titulo semeado.
 TERMO_COM_ERRO = "witcer"
 TITULO_ESPERADO = "The Witcher 3: Wild Hunt"
+
+# termo com erro que casa com varios jogos: o nome da desenvolvedora. os titulos
+# esperados nao ficam escritos aqui, saem do proprio catalogo.
+DESENVOLVEDORA = "FromSoftware"
+TERMO_COM_VARIOS_RESULTADOS = "fromsoftwre"
 
 
 def test_busca_tolera_erro_de_digitacao_e_ordena_por_relevancia(
@@ -52,6 +58,52 @@ def test_busca_tolera_erro_de_digitacao_e_ordena_por_relevancia(
     assert itens[0]["titulo"] == TITULO_ESPERADO, (
         f"o primeiro item da busca por {TERMO_COM_ERRO!r} e {itens[0]['titulo']!r}, "
         f"e deveria ser {TITULO_ESPERADO!r}.\n{descreve(resposta)}"
+    )
+
+    relevancias = [float(item["relevancia"]) for item in itens]
+    assert relevancias == sorted(relevancias, reverse=True), (
+        f"a relevancia cresce ao longo da resposta: {relevancias}. o melhor "
+        f"casamento tem de vir primeiro.\n{descreve(resposta)}"
+    )
+
+
+def test_busca_com_varios_resultados_ordena_por_relevancia(
+    cliente_usuario: ClienteApi, catalogo: list[Jogo]
+) -> None:
+    """Com varios resultados, a relevancia nunca cresce ao longo da resposta.
+
+    O termo do teste do Witcher tem um resultado so, e uma lista de um item esta
+    sempre ordenada: ali a ordem nao e provada. Aqui o termo casa com todos os
+    jogos de uma desenvolvedora, e a resposta tem de trazer cada um deles, do
+    melhor casamento para o pior.
+    """
+    esperados = {jogo.titulo for jogo in catalogo if jogo.desenvolvedora == DESENVOLVEDORA}
+    assert len(esperados) >= 2, (
+        f"o catalogo semeado tem {len(esperados)} jogo(s) ativo(s) da {DESENVOLVEDORA}: "
+        "com menos de dois, a ordem da resposta nao prova nada. confira o seed do catalogo."
+    )
+
+    resposta = cliente_usuario.get(CAMINHO_BUSCA, params={"q": TERMO_COM_VARIOS_RESULTADOS})
+
+    assert resposta.status_code == 200, (
+        f"a busca por {TERMO_COM_VARIOS_RESULTADOS!r} deveria devolver 200.\n"
+        f"{descreve(resposta)}\n"
+        "  503 aqui e busca desligada ou indice fora do ar, nao termo sem resultado."
+    )
+    assert respondido_pelo_backend(resposta), (
+        f"a busca nao foi atendida pelo servico.\n{descreve(resposta)}"
+    )
+
+    itens = resposta.json()
+    assert len(itens) >= 2, (
+        f"a busca por {TERMO_COM_VARIOS_RESULTADOS!r} trouxe {len(itens)} item(ns); "
+        f"o catalogo tem {len(esperados)} da {DESENVOLVEDORA}.\n{descreve(resposta)}"
+    )
+
+    faltando = esperados - {item["titulo"] for item in itens}
+    assert not faltando, (
+        f"a busca por {TERMO_COM_VARIOS_RESULTADOS!r} nao trouxe {sorted(faltando)}, "
+        f"que sao da {DESENVOLVEDORA} no catalogo.\n{descreve(resposta)}"
     )
 
     relevancias = [float(item["relevancia"]) for item in itens]
