@@ -1,7 +1,8 @@
 # Ambiente local — Docker Compose e Kubernetes (k3d)
 
 Guia de execução da plataforma FCG na máquina do desenvolvedor. Cobre os dois alvos locais:
-**Docker Compose** (mais rápido, sem cluster) e **Kubernetes em k3d** (fiel ao alvo de nuvem).
+**Docker Compose** (mais rápido, sem cluster) e **Kubernetes em k3d** (os mesmos manifestos do
+alvo de nuvem, com a [lista do que ele não prova](#o-que-o-k3d-não-prova)).
 
 Os dois sobem o mesmo conjunto de serviços — `fcg-identity`, `fcg-catalog`, `fcg-payments` —
 com a infraestrutura compartilhada (SQL Server, PostgreSQL, RabbitMQ, Redis, emulador do read
@@ -35,7 +36,7 @@ model) e a stack de observabilidade (Loki, Tempo, Prometheus, Grafana, OTel Coll
 |---|---|---|
 | **Docker Desktop** | Roda os containers do Compose e dá o backend ao cluster k3d. Traz o Compose v2 (`docker compose`). | <https://www.docker.com/products/docker-desktop/> |
 | **kubectl** | Aplica os manifestos de `k8s/`. | Já vem com o Docker Desktop. |
-| **k3d** | Sobe o cluster Kubernetes local (k3s em Docker). | `winget install --id k3d.k3d -e --source winget` |
+| **k3d** | Sobe o cluster Kubernetes local, com os nós como containers do Docker. | `winget install --id k3d.k3d -e --source winget` |
 | **OpenSSL** | Gera o par de chaves RSA de assinatura do JWT. | Já vem com o Git para Windows. |
 | **PAT do GitHub** com `read:packages` | **Só** para o fluxo `docker compose up --build`. O fluxo padrão não precisa. | <https://github.com/settings/tokens> |
 
@@ -54,17 +55,19 @@ carrega apenas **templates com placeholder**; o valor real é materializado loca
 
 | Arquivo versionado (template) | Arquivo local gerado (fora do git) | Conteúdo |
 |---|---|---|
-| `.env.example` | `.env`, `.env.k3d`, `.env.ec2` | Senhas, connection strings e a configuração que varia por ambiente |
+| `.env.example` | `.env`, `.env.k3d`, `.env.eks` | Senhas, connection strings e a configuração que varia por ambiente |
 | `docker-compose.override.example.yml` | `docker-compose.override.yml` | A chave RSA privada, como block scalar |
 | `secret.example.yaml` (vários) | `secret.yaml`, `secret-jwt.yaml` | Os dez Secrets do cluster |
 | `configmap-env.example.yaml` (três) | `configmap-env.yaml` | O que difere entre o cluster local e o da nuvem |
 
 ### Perfis de ambiente
 
-O ambiente é selecionado por `FCG_PERFIL`, que aceita **`k3d`** (padrão) ou **`ec2`**. Cada
-perfil tem seu próprio arquivo de valores — `.env.k3d` e `.env.ec2` — porque host, porta e TLS
+O ambiente é selecionado por `FCG_PERFIL`, que aceita **`k3d`** (padrão) ou **`eks`**. Cada
+perfil tem seu próprio arquivo de valores — `.env.k3d` e `.env.eks` — porque host, porta e TLS
 do broker diferem: no cluster local o RabbitMQ atende `5672` em texto claro; na nuvem o broker
-gerenciado atende `5671` com TLS.
+gerenciado atende `5671` com TLS. O `.env.eks` não se escreve à mão: ele é gerado a cada sessão
+de nuvem pelo `scripts/gerar-env.sh`, com senhas novas — ver o
+[runbook de sessão](runbook-sessao.md).
 
 Manter um arquivo só obrigaria a editar essas chaves a cada troca de ambiente, e o esquecimento
 **não dá erro de configuração** — dá conexão que falha longe da causa.
@@ -76,7 +79,7 @@ o perfil.
 > anterior.** O `.example` é a única fonte de verdade da forma; cópias antigas arrastam chaves
 > que já saíram do repositório.
 
-### As seis variáveis que variam por ambiente
+### As sete variáveis que variam por ambiente
 
 Estas não são credencial, mas mudam entre o cluster local e o da nuvem. Por isso ficam fora do
 ConfigMap versionado: o `init-secrets.sh` lê o arquivo do perfil e gera os `configmap-env.yaml`.
@@ -89,13 +92,28 @@ ConfigMap versionado: o `init-secrets.sh` lê o arquivo do perfil e gera os `con
 | `JWT_ISSUER` | `Jwt__Issuer` | `fcg-identity` |
 | `JWT_PUBLIC_BASE_URL` | `Jwt__PublicBaseUrl` | *(vazio)* |
 | `DYNAMODB_SERVICE_URL` | `DynamoDb__ServiceUrl` | `http://dynamodb-local:8000` |
+| `OPENSEARCH_ENDPOINT` | `OpenSearch__Endpoint` e `OpenSearch__UseSigV4` | *(vazio)* |
 
-Duas delas são legitimamente vazias em um dos ambientes (`JWT_PUBLIC_BASE_URL` no `k3d`,
-`DYNAMODB_SERVICE_URL` na nuvem). Para essas a exigência é a **chave estar declarada** no
-arquivo, não ter valor — assim um nome digitado errado ainda falha, em vez de virar string
-vazia em silêncio.
+Três delas são legitimamente vazias em um dos ambientes (`JWT_PUBLIC_BASE_URL` e
+`OPENSEARCH_ENDPOINT` no `k3d`, `DYNAMODB_SERVICE_URL` na nuvem). Para essas a exigência é a
+**chave estar declarada** no arquivo, não ter valor — assim um nome digitado errado ainda falha,
+em vez de virar string vazia em silêncio.
 
-No `.env.example`, o valor do perfil `ec2` vem numa linha `# ec2:` logo acima de cada variável.
+**`OPENSEARCH_ENDPOINT` vazia desliga a busca, e isso é o normal no local.** Não há motor de
+busca no cluster local: o domínio de busca só existe na sessão de nuvem, onde o
+`scripts/busca-env.sh` escreve o endereço dele depois que ele nasce. Com a variável vazia o
+`init-secrets.sh` não emite nenhuma das duas chaves no `catalog-env`, e o catálogo:
+
+- sobe saudável, com uma única linha de aviso no boot — `Busca desligada: OpenSearch:Endpoint
+  ausente.`;
+- responde `503` em `GET /api/jogos/search`, e só ali — listagem, compra e biblioteca seguem
+  normais;
+- não registra o check `opensearch` no `/health`.
+
+Por isso, no local, a suíte da borda roda com `-m "not busca"` (ver
+[tests/README.md](../tests/README.md)).
+
+No `.env.example`, o valor do perfil `eks` vem numa linha `# eks:` logo acima de cada variável.
 **Nunca ponha comentário na mesma linha da variável**: a leitura pega tudo após o `=` como
 valor e engoliria o comentário junto.
 
@@ -195,7 +213,25 @@ sair do recovery.
 
 ## Fluxo 2 — Kubernetes em k3d
 
-Fiel ao alvo de nuvem: os mesmos manifestos que rodam no cluster da instância.
+Os mesmos manifestos que rodam no cluster da sessão de nuvem, com o perfil `k3d` decidindo o
+pouco que muda (broker e emulador do read model locais, imagem do GHCR). É a verificação
+estrutural dos manifestos: se eles aplicam, se a ordem de boot converge, se o Ingress roteia,
+se as probes e os recursos fazem sentido. Ele **não** é a nuvem em miniatura — a lista abaixo
+diz onde a semelhança acaba.
+
+### O que o k3d não prova
+
+Cada item desta lista já enganou, ou enganaria, quem tomasse o verde do k3d por verde de
+produção. Item daqui só está pronto quando passa numa sessão de nuvem.
+
+| O que | No k3d | Na nuvem | Por que o verde local não vale |
+|---|---|---|---|
+| **Permissão de volume** | `local-path`, diretório do nó, gravável por qualquer usuário | volume EBS formatado, com dono | o SQL Server roda sem root e só grava no volume com `fsGroup: 10001`; o `local-path` escondia a falta disso |
+| **Credencial AWS** | DynamoDB emulado, sem credencial nenhuma | identidade de workload (Pod Identity) da conta de serviço `catalog` | o caminho de credencial do SDK nunca roda no local; pod criado antes da associação sobe sem credencial |
+| **Borda e balanceador** | `kubectl port-forward` direto no Traefik | API Gateway → VPC Link → NLB interno → target group → Traefik | o authorizer JWT, o registro dos alvos no target group e a drenagem no rollout não existem no local |
+| **Teto de pods por nó** | 110, o padrão do kubelet | 29 por nó `m7i-flex.large`: cada pod consome um endereço da VPC | a stack inteira cabe folgada no local; na nuvem o que esgota primeiro é o endereço, não CPU nem memória |
+| **Registry** | GHCR, tag `:latest` | ECR privado, tag = SHA completo do commit, imutável | um manifesto que só funciona com `:latest` passa no local e falha na nuvem |
+| **Busca** | sem domínio de busca: `/api/jogos/search` responde `503` | domínio gerenciado, assinatura SigV4 pela identidade do catalog | a indexação, a policy do domínio e a relevância só são exercidas na sessão |
 
 ### Passo 1 — criar o cluster
 
@@ -220,7 +256,7 @@ cp .env.example .env.k3d
 ```
 
 Preencha os valores reais, usando os valores de `k3d` da
-[tabela das seis variáveis](#as-seis-variáveis-que-variam-por-ambiente).
+[tabela das sete variáveis](#as-sete-variáveis-que-variam-por-ambiente).
 
 ### Passo 3 — materializar Secrets e ConfigMaps
 
@@ -248,11 +284,8 @@ O script é idempotente: reexecutar regenera os arquivos a partir do arquivo de 
 a chave RSA existente é reaproveitada. Ele **não inventa valores** — só materializa o que você
 preencheu.
 
-Para o perfil de nuvem, o mesmo script com o perfil trocado:
-
-```bash
-FCG_PERFIL=ec2 bash scripts/init-secrets.sh
-```
+Na sessão de nuvem roda o mesmo script com `FCG_PERFIL=eks`, depois que o broker e a busca
+foram escritos no `.env.eks` — a ordem está no [runbook de sessão](runbook-sessao.md).
 
 #### Alternativa manual, sem o script
 
@@ -302,15 +335,14 @@ O script aplica em ordem de boot e espera cada fase:
 Antes de aplicar qualquer coisa, ele confere que os treze arquivos gerados no passo 3 existem —
 se faltar algum, falha nomeando o arquivo e explicando como resolver, sem ter tocado no cluster.
 
-O perfil também vale aqui, e decide **o que sobe** da camada de infraestrutura:
+O perfil também vale aqui, e decide **o que sobe** da camada de infraestrutura. No perfil
+`eks`, `rabbitmq` e `dynamodb-local` **não sobem** — na nuvem os dois são serviço gerenciado. Um
+broker local de pé numa sessão de nuvem seria um destino alternativo silencioso: configuração
+errada conectaria nele e tudo pareceria funcionar, contra um broker vazio.
 
-```bash
-FCG_PERFIL=ec2 bash scripts/apply-all.sh
-```
-
-No perfil `ec2`, `rabbitmq` e `dynamodb-local` **não sobem** — na nuvem os dois são serviço
-gerenciado. Um broker local de pé numa sessão de nuvem seria um destino alternativo silencioso:
-configuração errada conectaria nele e tudo pareceria funcionar, contra um broker vazio.
+O script tem uma guarda de contexto: o perfil `k3d` só aplica com o `kubectl` apontando para
+`k3d-fcg`. Se ele recusar dizendo que o contexto é o de um cluster `fcg-eks`, é resto de uma
+sessão de nuvem: `kubectl config use-context k3d-fcg`.
 
 > **Num cluster recém-criado, o `apply-all.sh` leva cerca de 15 minutos**, dos quais ~7 são só o
 > SQL Server ficando pronto. As migrations em série somam ~4 minutos e a observabilidade ~2.
@@ -389,20 +421,28 @@ kubectl port-forward svc/rabbitmq     15672:15672 -n fcg  # http://localhost:156
 
 Cada comando ocupa o terminal enquanto o encaminhamento estiver ativo.
 
+#### Pelo Ingress, como na nuvem
+
+Os encaminhamentos acima vão direto em cada Service. Para exercitar o mesmo roteamento que a
+nuvem usa — o Ingress `fcg`, servido pelo Traefik que o k3d já traz —, encaminhe para o
+Traefik:
+
+```bash
+kubectl port-forward -n kube-system svc/traefik 18080:80   # http://localhost:18080
+```
+
+Por ali, `GET /.well-known/openid-configuration` responde `200`, `GET /api/jogos` sem token
+responde `401` com `Server: Kestrel` (o serviço recusou), e `GET /inexistente` responde `404`
+**sem** `Server: Kestrel` (o Traefik não achou rota). É o caminho para apontar a suíte de testes
+ao k3d: `FCG_API_BASE_URL=http://localhost:18080`, com `-m "not busca"`. Na nuvem, à frente do
+Traefik ainda há o gateway e o balanceador — é o item "borda" de
+[O que o k3d não prova](#o-que-o-k3d-não-prova).
+
 > **Não rode o Compose e os encaminhamentos do k3d ao mesmo tempo nas mesmas portas.** Os dois
 > alvos usam 8081, 8083, 8084, 3000 e 15672. Com ambos de pé, quem chegar primeiro fica com a
 > porta e o outro falha — ou, pior, o encaminhamento responde e dá a impressão de que o Compose
 > está saudável quando o container sequer subiu. Se precisar dos dois, use portas distintas
 > (`kubectl port-forward svc/identity-api 9081:80 -n fcg`).
-
-#### Sobre as portas de nó
-
-Os Services `identity-api` e `catalog-api` declaram `type: NodePort` com as portas **30081** e
-**30083**, fixadas para o alvo de nuvem, onde o gateway alcança o cluster por elas.
-
-**No k3d essas portas não são alcançáveis do host.** O `bootstrap-k3d.sh` cria o cluster sem
-mapear portas, então só a porta da API do Kubernetes é publicada — `curl localhost:30081` não
-responde. Localmente, o encaminhamento de porta é o caminho.
 
 ---
 
@@ -478,8 +518,8 @@ resultado, e o catálogo credita a biblioteca no read model.
 
 **Rejeição:** pedidos acima do teto de `Payment__RejectionThreshold` (padrão `5000`) são
 recusados. O pedido fica `Rejeitado` com o motivo preenchido, e a biblioteca **não** muda.
-O seed não traz jogo acima do teto — crie um com a conta administrativa para exercitar o
-caminho.
+O seed traz um jogo acima do teto (a edição de colecionador de Elden Ring, a 6500) justamente
+para exercitar esse caminho.
 
 ### 6. Estado do broker
 
@@ -539,32 +579,44 @@ Apagar o pod do emulador esvazia a biblioteca.
 Para reconstruí-la a partir do relacional, sem apagar nada:
 
 ```bash
-kubectl apply -f k8s/03-services/catalog/reprojetar-job.yaml
-kubectl wait --for=condition=complete job/catalog-reprojetar -n fcg --timeout=300s
+bash scripts/rodar-job-catalog.sh reprojetar
 ```
 
-Ao concluir, o log do Job informa quantos itens foram projetados:
+O script apaga o Job anterior (um Job concluído não roda de novo), aplica o Job
+`catalog-reprojetar` com **a imagem que o `catalog-api` está servindo agora** — lida do
+Deployment, para o Job rodar o mesmo código —, espera `Complete` ou `Failed` e imprime as
+últimas linhas do log, com a contagem de itens projetados. Sai `0` só com o Job `Complete`.
 
-```bash
-kubectl logs job/catalog-reprojetar -n fcg
-```
+O Job **não** faz parte da subida automática, de propósito: é operação sob demanda.
 
-O Job **não** faz parte da subida automática, de propósito: é operação sob demanda. Para
-reexecutá-lo, apague o Job anterior antes (`kubectl delete job catalog-reprojetar -n fcg`) — um
-Job concluído não roda de novo.
-
-> **A tabela precisa existir antes de o Job rodar.** Quem cria a tabela `fcg-biblioteca` é o
-> **boot do `catalog-api`**, não o Job de reconstrução. Se o pod do emulador foi apagado, a
-> tabela se foi junto com ele (a execução é em memória), e o Job falha com
-> `Cannot do operations on a non-existent table` — estourando o limite de tentativas e apagando
-> o próprio pod, o que deixa o diagnóstico sem log à mão. A ordem correta depois de perder o
-> emulador é reiniciar o catálogo primeiro, e só então reconstruir:
+> **A tabela precisa existir antes de o Job rodar.** Quem cria a tabela `fcg-biblioteca` no
+> local é o **boot do `catalog-api`**, não o Job de reconstrução. Se o pod do emulador foi
+> apagado, a tabela se foi junto com ele (a execução é em memória), e o Job falha com
+> `Cannot do operations on a non-existent table`. Ao estourar as tentativas o controlador apaga
+> o pod do Job, e com ele o log; por isso o script guarda o log a cada sondagem e, se o pod já
+> sumiu, mostra o último que leu, avisando. A ordem correta depois de perder o emulador é
+> reiniciar o catálogo primeiro, e só então reconstruir:
 >
 > ```bash
 > kubectl rollout restart deployment/catalog-api -n fcg
 > kubectl rollout status  deployment/catalog-api -n fcg --timeout=300s
-> kubectl apply -f k8s/03-services/catalog/reprojetar-job.yaml
+> bash scripts/rodar-job-catalog.sh reprojetar
 > ```
+
+### Reconstruir o índice de busca
+
+```bash
+bash scripts/rodar-job-catalog.sh reindexar
+```
+
+O mesmo script, com o Job `catalog-reindexar`: relê o catálogo do banco relacional e reescreve
+o índice de busca — indexa os jogos ativos e remove os desativados —, sem apagar nada do banco.
+
+**No local ele falha, e falha de propósito.** Sem domínio de busca o Job sai `1` com a linha
+`Reconstrução do índice pedida com a busca desligada: OpenSearch:Endpoint ausente.` Rodá-lo aqui
+serve para validar o próprio Job e o script — imagem lida do Deployment, espera, leitura do log
+de um Job que falhou — antes de ele ser preciso numa sessão de nuvem, onde é o remédio para um
+índice que ficou para trás.
 
 ### Reexecutar uma migration
 
@@ -740,8 +792,8 @@ flowchart LR
 - **Read model e cache:** a leitura da biblioteca vem da **projeção** no emulador, não do banco
   relacional; e a leitura do catálogo consulta o **cache** antes do banco, com a escrita invalidando
   o que estava guardado. Nenhum dos dois tem sintoma externo quando quebra — uma biblioteca servida
-  pelo lugar errado devolve resposta idêntica à correta —, e é por isso que a suíte de testes tem
-  uma camada que os observa de dentro do cluster.
+  pelo lugar errado devolve resposta idêntica à correta —, e é por isso que a suíte de testes teve,
+  na Fase 3, uma camada que os observava de dentro do cluster.
 - **A perna de notificação está truncada por ambiente.** As exchanges `user-created` e
   `payment-processed` registram publicação sem consumidor do lado das notificações, porque esse
   consumidor é a função serverless. Localmente as filas dela sequer são criadas.
