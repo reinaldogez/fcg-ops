@@ -7,6 +7,8 @@ set -euo pipefail
 # destroy vier antes, isso sobra na conta, cobrando, ou trava a remoção da rede.
 # A ordem foi a provada no spike: aplicação, volumes, ligação com a borda, Traefik,
 # controlador. Não roda terraform: o destroy é passo humano, por plano salvo.
+# Por último tira do kubeconfig o que o preparar-cluster-eks.sh pôs lá: sem isso o contexto
+# atual continua apontando para um cluster que o destroy vai apagar.
 
 CLUSTER="fcg-eks"
 REGIAO="us-east-1"
@@ -105,7 +107,16 @@ if [[ -n "$grupos" && "$grupos" != "None" ]]; then
   exit 1
 fi
 
-echo "==> 7/7 próximo passo (humano)"
+echo "==> 7/7 entradas do $CLUSTER no kubeconfig"
+# O update-kubeconfig do preparar-cluster-eks.sh grava contexto, cluster e usuário com o
+# mesmo nome, o ARN do cluster, que é o contexto validado pela guarda lá em cima. Deixá-los
+# depois do destroy faria o próximo kubectl esperar por um endpoint que não existe mais.
+kubectl config delete-context "$CONTEXTO"
+kubectl config delete-cluster "$CONTEXTO"
+kubectl config delete-user "$CONTEXTO"
+
 echo "ok: cluster $CLUSTER esvaziado; nada que ele criou sobrou na conta."
 echo "agora o plano de destruição do session/, salvo e revisado antes de aplicar:"
 echo "  terraform -chdir=terraform/session plan -destroy -out=../plans/session-destroy.tfplan"
+echo "contexto '$CONTEXTO' removido do kubeconfig; para voltar ao k3d:"
+echo "  kubectl config use-context k3d-fcg"

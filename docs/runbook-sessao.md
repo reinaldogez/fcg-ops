@@ -1,598 +1,942 @@
 # Runbook de sessão de nuvem
 
-Procedimento para abrir, usar e fechar uma sessão de nuvem da FCG. A plataforma permanente
-já existe: este documento **não** a levanta do zero — para conta virgem, veja
+Procedimento para abrir, usar e fechar uma sessão de nuvem da FCG: o ambiente de produção
+inteiro, do cluster ao broker, nasce no começo da sessão e morre no fim dela. Este documento
+**não** levanta a plataforma permanente — para uma conta onde ela não existe, veja
 [levantar-do-zero.md](levantar-do-zero.md).
 
-O que fica de pé entre sessões custa ~US$5,60/mês. O que se liga por sessão custa por hora, e
-o fechamento existe para que ele não sobreviva à noite.
-
-Salvo indicação em contrário, os comandos rodam **na raiz do repositório**, no laptop. Os que
-rodam na instância estão marcados como tal.
+Salvo indicação em contrário, os comandos rodam **no Git Bash, na raiz da cópia do repositório
+que guarda os estados do Terraform**, no laptop de quem administra.
 
 ## Sumário
 
-- [Os dois perfis](#os-dois-perfis)
+- [Para que serve](#para-que-serve)
 - [A máquina de quem administra](#a-máquina-de-quem-administra)
-- [As coordenadas da plataforma](#as-coordenadas-da-plataforma)
-- [Antes de iniciar a instância](#antes-de-iniciar-a-instância)
+- [Coordenadas](#coordenadas)
+- [Antes de abrir](#antes-de-abrir)
 - [Abertura](#abertura)
 - [Sessão verde](#sessão-verde)
-- [Acesso ao Grafana](#acesso-ao-grafana)
+- [Busca na sessão](#busca-na-sessão)
+- [Operações sob demanda](#operações-sob-demanda)
+- [Pipeline durante a sessão](#pipeline-durante-a-sessão)
+- [Medir disponibilidade](#medir-disponibilidade)
+- [Grafana](#grafana)
 - [Fechamento](#fechamento)
-- [Inventário permanente](#inventário-permanente)
+- [O que fica de pé entre sessões](#o-que-fica-de-pé-entre-sessões)
 - [Diagnóstico](#diagnóstico)
 
 ---
 
-## Os dois perfis
+## Para que serve
 
-| | **Borda** | **Saga** |
+**Sessão é o intervalo em que produção existe.** Fora dela não há cluster, nem broker, nem
+domínio de busca: só a plataforma permanente, que não serve requisição nenhuma além de recusas.
+Abrir é criar o ambiente a partir do código; fechar é destruí-lo até o inventário provar que
+nada cobrado por hora ficou de pé. A ideia é a da infraestrutura descartável: o ambiente não é
+cuidado, é recriado — e por isso o procedimento precisa ser repetível ao pé da letra.
+
+O Terraform tem duas camadas, e a fronteira entre elas é o tempo de vida:
+
+| Camada | Vida | O que mora nela |
 |---|---|---|
-| Instância do cluster | sim | sim |
-| Workloads (rotas, authorizer, discovery, dashboard, cache) | sim | sim |
-| Broker gerenciado | não | sim |
-| Topologia (exchange, fila, associação) | não | sim |
-| Função serverless e mapeamento de origem | não | sim |
-| Custo por hora | só a instância | instância + broker (~US$0,14/h) |
-| Tempo de abertura | ~5 min | ~15 min (o broker domina) |
+| `terraform/platform/` | permanente, aplicada uma vez por conta | rede; borda (API Gateway → VPC Link → NLB interno → target group do Traefik); repositórios de imagem; identidade federada do pipeline e as roles de entrega; roles de workload; segredo da credencial do broker |
+| `terraform/session/` | nasce e morre a cada sessão | cluster EKS e nós; add-ons; acessos ao cluster; associações de identidade de workload; broker gerenciado; tabela do read model; domínio de busca |
 
-**Na dúvida, Borda.** Subir o broker depois custa doze minutos; esquecê-lo ligado custa a
-noite. O perfil Borda cobre tudo que não é mensageria: autenticação, rotas protegidas,
-discovery, catálogo, read model, cache e dashboard.
+O `session/` lê o `platform/` por nome — nunca por estado remoto, nunca o contrário.
+
+**Estado inicial de toda sessão:** os bancos nascem vazios a cada abertura, e as migrations os
+preenchem com o mesmo seed — os jogos do catálogo e a conta `admin@fcg.com`, com a senha
+gerada para esta sessão. Todo o resto (usuários, pedidos, biblioteca, índice de busca) é criado
+pela própria plataforma a partir daí. Nada sobrevive de uma sessão para a outra, e isso é
+intencional: a sessão demonstra o código da `main`, não um estado acumulado.
+
+O procedimento anterior, com o cluster numa máquina virtual parada entre sessões, continua
+reproduzível na tag [`fase-3`](https://github.com/reinaldogez/fcg-ops/tree/fase-3/docs/runbook-sessao.md).
 
 ---
 
 ## A máquina de quem administra
 
 Esta seção é sobre o computador de onde os comandos saem, não sobre a plataforma. Num Linux ou
-macOS quase nada aqui se aplica; num Windows com o Git para Windows, tudo se aplica.
+macOS quase nada da parte do Git Bash se aplica; num Windows, tudo se aplica.
 
-**O que precisa existir:** `terraform`, `aws`, `kubectl`, `ssh`, `scp`, `tar`, `git`, e um
-Python com a suíte de testes se for rodá-la. A credencial da AWS é a do usuário de operação,
-conferida com `aws sts get-caller-identity` antes de qualquer coisa.
+### Ferramentas
 
-### A conversão de caminho do MSYS, e o comando que mente
+As versões com que o procedimento foi provado, ponta a ponta, em sessão:
 
-O `bash` que acompanha o Git para Windows roda sobre MSYS, que **reescreve todo argumento
-começado por `/`** como caminho do Windows antes de entregá-lo a um executável nativo. O
-`aws.exe` é nativo. O efeito:
+| Ferramenta | Versão provada | Para quê |
+|---|---|---|
+| `terraform` | 1.15.8 | os dois roots |
+| `aws` (CLI v2) | 2.36.2 | inventário, esperas, consultas |
+| `kubectl` | 1.36.1 | o cluster é 1.37, dentro do desvio de versão suportado |
+| `helm` | 4.3.1 | controlador de balanceador e Traefik |
+| `crane` | 0.22.1 | só o `semear-ecr.sh`, que é ferramenta de recuperação |
+| `jq`, `git`, `openssl`, `curl`, Python 3 | — | scripts e a suíte de testes |
+| `gh` | — | ler e re-executar runs do pipeline |
 
-```
-/aws/lambda/fcg-notifications-fn   →   C:/Program Files/Git/aws/lambda/fcg-notifications-fn
-```
+O shell de referência é o **Git Bash**. Há três `bash` nesta máquina, e eles não são
+intercambiáveis: o do Git para Windows (o que os scripts esperam), o do WSL — outro sistema de
+arquivos, que não enxerga a cópia do repositório — e o que o PowerShell resolve por padrão, que
+costuma ser o do WSL. Rode tudo de um terminal Git Bash.
 
-Dois sintomas, e o segundo é o caro:
+### A cópia do repositório e o que só existe nela
 
-| Comando | O que acontece |
-|---|---|
-| `aws logs describe-log-streams --log-group-name /aws/...` | `InvalidParameterException` — reclama, e você percebe |
-| `aws logs filter-log-events --log-group-name /aws/...` | **volta vazio, com `exit 0`** — parece que nada aconteceu |
+A sessão roda de **uma cópia específica** do repositório, porque é nela que estão os arquivos
+que o git não guarda — de propósito:
 
-O segundo já produziu um diagnóstico errado: log vazio lido como "a função nunca foi invocada",
-contra **23 invocações** que a métrica do CloudWatch mostrava. Um comando que passa por não ter
-feito nada é pior que um que falha.
+| Arquivo | O que é | Por que não é versionado |
+|---|---|---|
+| `terraform/platform/terraform.tfstate` e `terraform/session/terraform.tfstate` | os estados dos dois roots | o do `session/` guarda a senha do broker em texto claro |
+| `terraform/platform/terraform.tfvars` | as variáveis da plataforma | valores da conta |
+| `terraform/plans/` | os planos salvos da sessão | contêm valores sensíveis do estado |
+| `.env.eks` | senhas e configuração da sessão | gerado a cada abertura, apagado no fechamento |
+| `identity-rsa-private.pem` | chave de assinatura dos tokens | chave privada |
+| `tests/.venv` | ambiente da suíte de testes | local da máquina |
 
-**Conserto**, uma vez por terminal, antes de qualquer `aws` com argumento em `/`:
+Um clone novo não tem nada disso. Trabalhar de outra cópia é abrir uma sessão sem estado — o
+`plan` tentaria criar de novo o que já existe.
+
+### Credencial AWS
+
+A credencial é a do usuário de operação, conferida antes de qualquer coisa:
 
 ```bash
-export MSYS2_ARG_CONV_EXCL='*'
+aws sts get-caller-identity --query Account --output text   # 538003079756
 ```
 
-Fora do MSYS a variável não tem efeito nenhum, então exportá-la sempre é seguro.
+O pipeline dos serviços não usa essa credencial nem nenhuma outra guardada: ele entra pela
+identidade federada do GitHub, um papel por repositório.
 
-O `inventario-aws.sh` **já faz esse export sozinho**, no topo — mas isso protege só o que roda
-dentro dele. Consulta avulsa na linha de comando continua desprotegida, e é onde o erro
-aparece.
+### Git Bash: conversão de caminho, e o comando que mente
 
-**Quando o resultado for "nada aconteceu", confirme por outro caminho** antes de concluir:
-métrica do CloudWatch em vez de log, `describe-*` em vez de `filter-*`. Ausência de resultado e
-falha silenciosa são indistinguíveis aqui.
+O Git Bash roda sobre MSYS, que **reescreve todo argumento começado por `/`** como caminho do
+Windows antes de entregá-lo a um executável nativo — e o `aws.exe` é nativo:
 
-### Duas medidas, não uma
+```
+/aws/apigateway/fcg-api   →   C:/Program Files/Git/aws/apigateway/fcg-api
+```
 
-Invocar o inventário exige o caminho explícito do interpretador **e** a variável — cada uma
-resolve um problema diferente, e cada uma sozinha já foi medida falhando. Ver
-[o gate acusa AUSENTE](#o-gate-acusa-ausente-um-recurso-que-existe).
+Uns comandos reclamam (`InvalidParameterException`) e você percebe. Outros, como
+`aws logs filter-log-events`, **voltam vazios com `exit 0`** — parece que nada aconteceu. Um
+comando que passa por não ter feito nada é pior que um que falha.
 
-Há **três** `bash` nesta máquina, e eles não são intercambiáveis: o do Git para Windows (o que
-os scripts esperam), o do WSL — que é outro sistema de arquivos e não enxerga o worktree — e o
-que o PowerShell resolve por padrão, que costuma ser o do WSL. Daí o caminho explícito.
+O conserto é desligar a conversão **só no comando que precisa**, nunca no terminal inteiro:
+
+```bash
+MSYS2_ARG_CONV_EXCL='*' aws logs filter-log-events --log-group-name /aws/apigateway/fcg-api ...
+```
+
+**Não exporte `MSYS2_ARG_CONV_EXCL`.** Exportada, ela quebra os comandos que dependem da
+conversão — `curl -o /dev/null` e `git -C /c/...` entre eles, ambos usados neste documento. O
+`inventario-aws.sh` liga a variável dentro dele mesmo, só para os processos
+dele, e por isso pode ser chamado direto.
+
+Quando o resultado for "nada aconteceu", confirme por outro caminho antes de concluir — métrica
+em vez de log, `describe-*` em vez de `filter-*`.
+
+### Segredo gerado no Git Bash
+
+A saída do `openssl` no Windows pode trazer `\r` no fim, e o `\r` vira parte da senha sem
+aparecer em lugar nenhum. Todo segredo gerado à mão passa por `tr -d '\r\n'` (ou nasce dentro de
+`$(...)`). Os scripts do repositório já fazem isso; a regra vale para o que for digitado.
+
+### Mais três hábitos
+
+- **`unset GH_TOKEN` antes do `gh`.** Um token inválido no ambiente vence o do chaveiro, e o
+  `gh` falha com erro de autenticação que não aponta a variável.
+- **Cada `kubectl` do laptop custa uns três segundos.** Aplique por diretório e por script, não
+  arquivo a arquivo.
+- **Nunca imprima senha nem token.** Leia para variável e use a variável; os comandos deste
+  documento seguem essa forma.
 
 ---
 
-## As coordenadas da plataforma
+## Coordenadas
 
-Os comandos deste documento usam `<...>` para valores que a conta resolve. Descubra-os uma
-vez, no começo da sessão, e mantenha-os à mão.
+Os valores fixos da plataforma. Os de sessão têm nome fixo e identificador novo a cada abertura.
 
-| Placeholder | Como descobrir |
+| Item | Valor |
 |---|---|
-| `<id-instância>` | `aws ec2 describe-instances --filters "Name=tag:Name,Values=fcg-*" --query "Reservations[].Instances[].InstanceId" --output text` |
-| `<endereço-fixo>` | a mesma consulta, trocando `InstanceId` por `PublicIpAddress` |
-| `<id-broker>` | sai do apply da abertura como `broker_name`; ou `aws mq list-brokers --query "BrokerSummaries[?starts_with(BrokerName,'fcg')].BrokerId" --output text` |
-| `<api>` | `aws apigatewayv2 get-apis --query "Items[?starts_with(Name,'fcg')].ApiId" --output text` |
-| `<região>` | `us-east-1` |
-| `<repo-da-função>` | onde estiver o clone do repositório da função serverless — outro worktree, fora deste repositório |
+| Conta / região | `538003079756` / `us-east-1` |
+| Endereço público (= emissor dos tokens) | `https://ss1g69q5h9.execute-api.us-east-1.amazonaws.com` — `terraform -chdir=terraform/platform output -raw api_issuer` |
+| Cluster EKS | `fcg-eks` (contexto do `kubectl`: `arn:aws:eks:us-east-1:538003079756:cluster/fcg-eks`) |
+| Broker gerenciado | `fcg-broker` |
+| Domínio de busca | `fcg-busca` |
+| Tabela do read model | `fcg-biblioteca` |
+| Repositórios de imagem (ECR) | `fcg-identity`, `fcg-catalog`, `fcg-payments` — tags imutáveis, tag = SHA completo do commit |
+| Namespace da aplicação | `fcg` |
 
-O identificador da instância e o endereço fixo **não mudam entre sessões** — o endereço é
-associado e sobrevive à parada. O do broker muda a cada sessão, porque o broker é recriado.
+O endereço público só muda se a plataforma for recriada; o `levantar-do-zero.md` trata disso.
+Use sempre o `api_issuer`, **sem barra final** — o output vizinho, `api_invoke_url`, tem a barra
+e produz `404` em URL de teste e `401` como emissor.
 
 ---
 
-## Antes de iniciar a instância
+## Antes de abrir
 
-Estes dois passos custam **zero** — a instância ainda está parada. É onde a sessão se salva.
+Tudo aqui custa zero: nada foi criado ainda. É onde a sessão se salva.
 
-### 1. Conferir o endereço administrativo
-
-A regra de SSH autoriza um endereço `/32`: o da máquina de quem administra. Ele **caduca
-quando o provedor troca o IP** — medido acontecendo com **um dia** de intervalo, não meses.
-Descobrir isso depois custa o tempo de diagnóstico com a instância de pé e cobrando.
+**1. A `main` atualizada, e o commit anotado.**
 
 ```bash
-curl https://checkip.amazonaws.com
-grep admin_cidr terraform/platform/terraform.tfvars
+git switch main && git pull --ff-only
+git rev-parse HEAD          # anote nas notas da sessão
+git status --porcelain      # vazio
 ```
 
-Se divergirem, atualize o `terraform.tfvars` e reaplique:
+A sessão sobe o que está na `main` **deste momento**. Anote o commit nas notas da sessão; este
+documento não fixa commit nenhum, porque a `main` anda.
+
+Os registros da sessão (planos em texto, saída dos applies, medições) vão para uma pasta fora
+da cópia, para não sujar o repositório:
 
 ```bash
-terraform -chdir=terraform/platform apply
+REG="$HOME/fcg-sessao/$(date -u +%Y%m%d)"; mkdir -p "$REG"
 ```
 
-O plano tem de sair **`0 to add, 1 to change, 0 to destroy`** — só o endereço da regra de
-ingresso. Qualquer coisa além disso é sinal de que algo mais mudou; leia antes de confirmar.
+**2. A credencial certa** (`aws sts get-caller-identity`, como em [Credencial
+AWS](#credencial-aws)).
 
-### 2. Preparar a invocação do inventário
+**3. O inventário sai zero.**
 
-O `inventario-aws.sh` é o gate de abertura e de fechamento. Nesta máquina ele exige **duas
-medidas juntas** — uma sozinha produz falso negativo. Ver
-[o gate acusa AUSENTE](#o-gate-acusa-ausente-um-recurso-que-existe).
-
-Do PowerShell:
-
-```powershell
-$env:MSYS2_ARG_CONV_EXCL = '*'
-& "C:\Program Files\Git\bin\bash.exe" scripts/inventario-aws.sh
+```bash
+bash scripts/inventario-aws.sh; echo $?   # 0
 ```
 
-Saídas: `0` inventário correto · `1` sobrou recurso cobrado por hora · `2` falta peça do
-permanente.
+`0` é a plataforma completa e nada cobrado por hora de pé. `1` é sobra de uma sessão anterior —
+exatamente o que este gate existe para pegar: não abra por cima, feche o que sobrou primeiro.
+`2` é peça do permanente faltando: o lugar é o [levantar-do-zero.md](levantar-do-zero.md).
 
-**A abertura só continua com `exit 0`.** Recurso cobrado sobrando de uma sessão anterior é
-justamente o que este gate existe para pegar.
+**4. O estado do `session/` vazio.**
+
+```bash
+terraform -chdir=terraform/session state list   # nenhuma linha
+```
+
+Qualquer linha é uma sessão anterior mal fechada. O fechamento dela vem antes desta abertura.
+
+**5. A borda no padrão.**
+
+```bash
+terraform -chdir=terraform/platform plan -input=false -detailed-exitcode   # sai 0
+```
+
+`0` é o authorizer de pé e nada pendente no permanente. Qualquer outro código pede leitura do
+plano antes de seguir.
+
+**6. O plano do `session/`, salvo e revisado.**
+
+```bash
+terraform -chdir=terraform/session init -input=false
+terraform -chdir=terraform/session plan -input=false -no-color \
+  -out=../plans/session.tfplan > "$REG/plano-session.txt" 2>&1
+grep '^Plan:' "$REG/plano-session.txt"
+```
+
+O plano salvo fica em `terraform/plans/` (fora do git); o texto, em `$REG`. Esperado:
+
+```
+Plan: 53 to add, 0 to change, 0 to destroy.
+```
+
+Leia o plano: nenhum endereço fora do `session/`, nenhum `replace`. O número muda só com o
+fallback da policy de edição do pipeline (`-var cd_politica_edicao=true`, que dá **56**); sem
+motivo para ele, 53 é o certo, e qualquer outro número é sinal para parar.
+
+**Nunca `-auto-approve`, nunca `-target`.** Todo `apply` desta sessão é de **plano salvo e
+revisado** — o que foi lido é o que se aplica, sem replanejar no meio.
 
 ---
 
 ## Abertura
 
-O broker leva ~12 minutos para nascer. Dispare-o **primeiro e sem esperar**, e use esse tempo
-para o resto — é o pedágio em paralelo.
+A abertura corre em **duas filas**. O apply do `session/` leva uns quinze minutos, e nada do
+que o laptop precisa preparar depende dele; e, com o cluster de pé, metade da aplicação —
+bancos, cache, observabilidade — não precisa do broker nem da busca. Esperar tudo em série
+somaria esperas que se sobrepõem.
 
-### 1. Disparar o broker (só perfil Saga)
-
-```bash
-terraform -chdir=terraform/session apply
+```mermaid
+flowchart LR
+  t0([início]) --> apply[apply do session<br/>em segundo plano]
+  t0 --> lap[laptop<br/>gerar-env.sh<br/>imagens-da-main.sh]
+  apply --> eks[cluster ACTIVE<br/>nós e add-ons prontos]
+  eks --> prep[preparar-cluster-eks.sh]
+  subgraph fila1[fila 1 - sem broker]
+    base[init-secrets.sh<br/>apply-all.sh fase base]
+  end
+  subgraph fila2[fila 2 - broker e busca]
+    env[broker-env.sh<br/>busca-env.sh<br/>init-secrets.sh]
+    svc[apply-all.sh<br/>fase servicos]
+  end
+  prep --> base
+  lap --> base
+  apply --> fim[apply concluído<br/>53 added]
+  fim --> env
+  base --> svc
+  env --> svc
+  svc --> conv[tag de cada serviço<br/>igual ao HEAD da main]
+  conv --> verde([sessão verde])
 ```
 
-Sempre com `-chdir`. Aplicar no root errado sai `exit 0` com `No changes` e broker nenhum
-criado — ver [comando que passa por não ter feito nada](#comando-que-passa-por-não-ter-feito-nada).
-
-O plano tem de sair **`13 to add, 0 to change, 0 to destroy`** — o broker, seu grupo de
-segurança, as regras e os endpoints de interface. Número diferente merece leitura antes de
-confirmar. Se o root nunca foi inicializado nesta máquina, rode
-`terraform -chdir=terraform/session init` antes. **Nenhum `-var` é necessário:** o padrão já é
-o estado correto.
-
-O broker leva ~12 minutos para ficar disponível — medido em 12m12s.
-
-Anote os dois outputs (`broker_name` e `broker_endpoint`) e **siga para o passo 2 sem
-esperar**. A senha não sai por output nenhum: ela vive no gerenciador de segredos.
-
-### 2. Iniciar a instância
+### 1. Disparar o apply
 
 ```bash
-aws ec2 start-instances --instance-ids <id-instância>
-aws ec2 wait instance-running --instance-ids <id-instância>
-ssh ec2-user@<endereço-fixo>
+date -u +%Y-%m-%dT%H:%M:%SZ   # anote: início da sessão
+terraform -chdir=terraform/session apply -no-color ../plans/session.tfplan \
+  > "$REG/apply-session.txt" 2>&1 &
 ```
 
-O endereço IP é fixo e associado — não muda entre sessões. A chave é a padrão do laptop, sem
-`-i`.
+Acompanhe o arquivo. Recurso longo — cluster, broker, domínio de busca — imprime
+`Still creating...` a cada dez segundos. **Se a linha some logo depois do `Creating...`**, a
+nuvem recusou o pedido e o Terraform está esperando à toa: consulte o CloudTrail em vez de
+esperar.
 
-O SSH pode avisar que a conexão **não usa troca de chaves pós-quântica**. É observação do
-cliente novo sobre o servidor da instância, não erro nem falha de autenticação: a sessão
-prossegue normalmente.
-
-### 3. Atualizar o worktree da instância
-
-A instância **não tem `git`**, e o clone não traria os Secrets materializados nem o arquivo
-de variáveis, que são não-versionados. O caminho é transferir o worktree do laptop:
+### 2. Enquanto isso, o laptop
 
 ```bash
-tar --exclude=.git --exclude=.venv --exclude='.env*' --exclude='*.pem' \
-    --exclude=terraform -cz k8s scripts observability | \
-  ssh ec2-user@<endereço-fixo> 'mkdir -p ~/fcg-ops && tar -xz -C ~/fcg-ops'
+bash scripts/gerar-env.sh
+bash scripts/imagens-da-main.sh
 ```
 
-O `mkdir -p` cobre a instância que ainda não tem o diretório; onde ele já existe, não faz nada.
+O `gerar-env.sh` escreve o `.env.eks` desta sessão a partir do `.env.example`: senhas novas, o
+broker em TLS, o read model gerenciado e o emissor dos tokens apontando para o endereço
+público. A saída mostra só os nomes das chaves. Se sobrou um `.env.eks` de uma sessão anterior,
+ele recusa — as senhas de um arquivo existente são as dos bancos daquela sessão — e o certo é
+`bash scripts/gerar-env.sh --substituir`.
 
-**Ordem obrigatória: worktree primeiro, arquivo de perfil depois.** O inverso produz um
-script lendo `.env.ec2` enquanto o outro escreve em `.env`, sem erro nenhum — o valor
-simplesmente não alcança o cluster, e o sintoma aparece longe da causa.
+O `imagens-da-main.sh` confere que existe no ECR, para cada serviço, a imagem do commit atual da
+`main` do repositório dele. O `apply-all.sh` chama o mesmo script na fase de serviços; rodá-lo
+aqui só antecipa a resposta para quando ainda há tempo de agir.
 
-Na instância, o arquivo de perfil é `.env.ec2`.
+#### Imagens: a da main ou nenhuma
 
-### 4. Inspecionar o cluster — não reaplicar
+A sessão exige a imagem **do HEAD da `main`** de cada serviço, e **não cai para outra** se ela
+faltar: subir uma imagem diferente faria a sessão demonstrar um código que não é o que está no
+repositório. Normalmente ela existe, porque o pipeline publica no ECR a cada push na `main`.
 
-O k3s e o etcd persistem no volume: os objetos do cluster **sobrevivem à parada**, e só os
-containers reiniciam. O `apply-all.sh` **não precisa rodar** a cada sessão. Inspecione:
+Se faltar — o run daquele commit falhou na publicação, ou o repositório de imagem foi
+esvaziado —, a ferramenta de recuperação é:
 
 ```bash
-kubectl get pods -n fcg
-kubectl get jobs -n fcg
+bash scripts/semear-ecr.sh
 ```
 
-As duas consultas, não só a primeira. Um Job de migration `Failed` herdado de sessão anterior
-faz uma reaplicação futura esperar **dez minutos em silêncio**, dentro da janela paga, sem
-que a mensagem diga que está esperando Job.
+Ele copia do GHCR para o ECR a imagem que o CI do serviço publicou **para o mesmo commit**, só a
+plataforma `linux/amd64`, e pula a tag que já existe. Não constrói nada e não escolhe outra
+versão. Precisa do `crane`.
 
-O esperado na nuvem é **doze pods** `Running` e **três Jobs** `Complete`. O `get pods` mostra
-quinze linhas: as três a mais são os pods dos Jobs, que ficam `Completed` e não contam como
-`Running`.
+### 3. O cluster pronto
 
-| | |
+```bash
+aws eks describe-cluster --name fcg-eks --query cluster.status --output text   # ACTIVE
+NG=$(aws eks list-nodegroups --cluster-name fcg-eks --query 'nodegroups[0]' --output text)
+aws eks describe-nodegroup --cluster-name fcg-eks --nodegroup-name "$NG" --query nodegroup.status --output text   # ACTIVE
+for a in aws-ebs-csi-driver coredns; do
+  aws eks describe-addon --cluster-name fcg-eks --addon-name "$a" --query addon.status --output text   # ACTIVE
+done
+aws eks list-pod-identity-associations --cluster-name fcg-eks \
+  --query 'associations[].[namespace,serviceAccount]' --output text
+```
+
+O cluster leva uns dez minutos para sair `ACTIVE`; antes disso a consulta erra por recurso
+inexistente, e é só repetir. As associações de identidade de workload têm de listar
+`fcg catalog` e `kube-system aws-load-balancer-controller`. A do catalog **precisa existir antes
+de qualquer pod do catalog**: a credencial é injetada na criação do pod, e um pod anterior à
+associação fica sem ela até ser recriado. A ordem garante isso sozinha — a associação nasce no
+apply, e o catalog só sobe na fila 2.
+
+### 4. Preparar o cluster
+
+```bash
+bash scripts/preparar-cluster-eks.sh 2>&1 | tee "$REG/preparar.txt"
+```
+
+Grava no kubeconfig o contexto do `fcg-eks` (e o deixa como atual), cria a classe de disco
+`gp3` padrão, instala o controlador de balanceador e o Traefik, e liga o Traefik ao target group
+da borda. Termina com `ok: cluster fcg-eks preparado (2 alvos healthy no target group).` — os
+dois alvos saudáveis são o caminho NLB → Traefik pronto.
+
+### 5. Fila 1 — sem broker
+
+```bash
+FCG_PERFIL=eks bash scripts/init-secrets.sh
+FCG_PERFIL=eks FCG_FASE=base bash scripts/apply-all.sh 2>&1 | tee "$REG/apply-all-base.txt"
+```
+
+Bancos, cache, observabilidade e o RBAC do pipeline. O primeiro pull do SQL Server domina o
+tempo. O `init-secrets.sh` avisa aqui que a busca está desligada no `catalog-env` — é esperado:
+o domínio de busca ainda não terminou de nascer, e a fase base não sobe o catalog.
+
+### 6. O fim do apply
+
+```bash
+grep -E '^Apply complete' "$REG/apply-session.txt"
+# Apply complete! Resources: 53 added, 0 changed, 0 destroyed.
+```
+
+A fila 2 espera o apply inteiro porque o endereço do domínio de busca é output dele. Nas sessões
+medidas essa espera custou zero: o apply terminou junto com a preparação do cluster ou antes
+dela.
+
+### 7. Fila 2 — broker e busca
+
+```bash
+aws mq list-brokers --query "BrokerSummaries[?BrokerName=='fcg-broker'].BrokerState" --output text   # RUNNING
+bash scripts/broker-env.sh
+bash scripts/busca-env.sh
+FCG_PERFIL=eks bash scripts/init-secrets.sh
+FCG_PERFIL=eks FCG_FASE=servicos bash scripts/apply-all.sh 2>&1 | tee "$REG/apply-all-servicos.txt"
+```
+
+O `broker-env.sh` lê o endereço do broker e a credencial dele no Secrets Manager e os escreve no
+`.env.eks` sem imprimir a senha. O `busca-env.sh` lê o output `opensearch_endpoint` do estado
+local — sem chamada à nuvem — e escreve o `OPENSEARCH_ENDPOINT`. O `init-secrets.sh` rematerializa
+Secrets e ConfigMaps com tudo isso. O `apply-all.sh` aplica identity, catalog e payments, cada
+um com o Job de migration concluído antes do Deployment, depois o Ingress, e espera os três
+rollouts.
+
+**A barreira da busca.** Na fase de serviços do `eks`, o `apply-all.sh` **recusa** seguir se o
+`catalog-env` não tiver o endereço do domínio de busca. Sem ele o catalog sobe saudável, o
+rollout passa, e a busca responde `503` — o defeito só apareceria no uso. A recusa vem antes de
+qualquer apply e diz o que rodar: `busca-env.sh` e `init-secrets.sh`.
+
+### Se algo falhar no meio
+
+Depois do primeiro `apply`, toda falha tem o mesmo desvio: colha o diagnóstico do ponto que
+falhou (`kubectl get pods -A`, os eventos do namespace, o `describe` e o log do pod com problema —
+sem imprimir variável de ambiente), consulte o [Diagnóstico](#diagnóstico), e, se não resolver,
+**feche a sessão** pelo [Fechamento](#fechamento), inteiro. Uma sessão aberta pela metade cobra
+igual a uma inteira. Antes do primeiro `apply` não há o que fechar: pare e investigue.
+
+### Tempos medidos
+
+| Sessão | Do início ao primeiro login pela borda |
 |---|---|
-| Serviços | `identity-api`, `catalog-api`, `payments-api` |
-| Bancos | `sqlserver-identity-0`, `postgres-catalog-0`, `postgres-payments-0`, `redis` |
-| Observabilidade | `grafana`, `prometheus`, `loki`, `tempo`, `otel-collector` |
-| Jobs | `identity-migrate`, `catalog-migrate`, `payments-migrate` |
+| primeira sessão da plataforma (com o authorizer criado no meio) | 24m22s |
+| segunda | 22m41s |
+| terceira | 24m11s |
 
-**Nem `rabbitmq` nem `dynamodb-local` sobem na nuvem, e isso é correto.** Lá o broker é o
-serviço gerenciado e o read model é a tabela real — os dois só existem como pod no perfil local,
-onde o emulador faz o papel deles. Quem conhece o ambiente local conta os pods aqui e conclui
-que faltam dois; não faltam.
+O apply do `session/` levou de 15 a 16 minutos. O caminho crítico é o cluster e os nós (de 11 a
+13 minutos juntos); o domínio de busca é o recurso mais lento (~15 min), mas fica fora do caminho do
+login.
 
-**Inspecionar cedo demais engana.** Nos primeiros minutos depois do boot os três serviços
-aparecem `0/1 Running` — ou mesmo `Unknown`, enquanto o nó reassume os pods —, porque as probes
-ainda não fecharam. Não é defeito: é o cluster voltando. Em vez de contar na hora, espere a
-convergência:
+### Convergência com a main
 
-```bash
-kubectl wait --for=condition=ready pod -l app=identity-api -n fcg --timeout=180s
-kubectl wait --for=condition=ready pod -l app=catalog-api  -n fcg --timeout=120s
-kubectl wait --for=condition=ready pod -l app=payments-api -n fcg --timeout=120s
-```
-
-Tudo `Running` e os Jobs `Complete` → siga. Cluster vazio ou serviços faltando → o
-procedimento é o de [levantar-do-zero.md](levantar-do-zero.md#a-camada-de-workloads).
-
-### 5. Confirmar o broker disponível (só perfil Saga)
+A sessão só demonstra produção se cada serviço estiver rodando **o commit atual da `main`
+dele**. A abertura garante isso no momento em que o `apply-all.sh` resolve as imagens — mas um
+push que entrou na `main` entre esse momento e a stack ficar de pé não foi implantado. Confira
+no fim da abertura, e de novo antes da sessão verde:
 
 ```bash
-aws mq describe-broker --broker-id <id-broker> --query 'BrokerState'
+for s in identity catalog payments; do
+  head=$(git ls-remote "https://github.com/reinaldogez/fcg-$s.git" refs/heads/main | cut -f1)
+  img=$(kubectl get deploy "$s-api" -n fcg -o jsonpath="{.spec.template.spec.containers[?(@.name=='$s-api')].image}")
+  [ "${img##*:}" = "$head" ] && echo "ok $s" || echo "DIVERGE $s: implantado ${img##*:}, main $head"
+done
 ```
 
-Espere `RUNNING`. A versão do motor sobe de patch na janela de manutenção — a versão menor é
-que está fixada, e a exata só se sabe consultando.
+**Por que pode divergir, e o que fazer.** O job de deploy do pipeline tem duas guardas:
 
-### 6. Preencher o endereço do broker, criar a topologia — nesta ordem
+- só implanta se o commit do run **ainda for o HEAD da `main`** — um run atrasado nunca
+  sobrescreve um commit mais novo;
+- se não há cluster, se o cluster está nascendo ou morrendo, se a stack ainda não está de pé,
+  ou se a identidade do pipeline ainda não tem acesso, ele **adia**: termina verde, com a imagem
+  publicada, sem tocar o cluster.
 
-Os três passos seguintes têm **ordem obrigatória**, e todos rodam **na instância**.
+Nenhum dos dois casos tenta de novo sozinho. Um push feito durante a abertura cai no segundo:
+run verde, imagem no ECR, cluster com o commit anterior. O remédio é **re-executar o run do
+HEAD** — a guarda de HEAD passa, porque ele continua sendo o HEAD, e a de stack também, porque
+agora ela está de pé:
 
 ```bash
-# na instância, em ~/fcg-ops
-./scripts/broker-env.sh
+unset GH_TOKEN
+s=<serviço>
+head=$(git ls-remote "https://github.com/reinaldogez/fcg-$s.git" refs/heads/main | cut -f1)
+gh run list -R "reinaldogez/fcg-$s" --workflow ci --branch main --limit 10 \
+  --json databaseId,headSha,conclusion --jq ".[] | select(.headSha == \"$head\")"
+gh run rerun <databaseId> -R "reinaldogez/fcg-$s"
 ```
 
-Ele descobre o broker pelo nome, lê a credencial do gerenciador de segredos e escreve três
-chaves no arquivo de perfil. A senha nunca é impressa. Só o endereço estava obsoleto — porta
-e TLS já ficam corretos entre sessões.
-
-```bash
-ENV_FILE=.env.ec2 ./scripts/topologia.sh
-```
-
-**Passe o `ENV_FILE` explicitamente.** O script hoje escolhe o arquivo por perfil, como os
-outros dois, e o próprio `broker-env.sh` termina imprimindo a forma equivalente
-(`FCG_PERFIL=ec2 bash scripts/topologia.sh`) — as duas funcionam e criam a mesma topologia. O
-`ENV_FILE` explícito vence qualquer recuo, e é a defesa contra um worktree defasado na
-instância, que é um estado em que ela já foi encontrada.
-
-O que **não** protege nem uma forma nem a outra: um arquivo de perfil com o endereço de uma
-sessão anterior tem todas as chaves preenchidas, passa na pré-condição e cria a topologia no
-broker errado. A defesa é a ordem — `broker-env.sh` **antes** de `topologia.sh`, sempre.
-
-Depois, re-materialize a configuração, **aplique-a no cluster** e reinicie os serviços para que
-leiam o endereço novo:
-
-```bash
-FCG_PERFIL=ec2 ./scripts/init-secrets.sh
-
-kubectl apply -f k8s/03-services/identity/configmap-env.yaml \
-              -f k8s/03-services/identity/secret.yaml \
-              -f k8s/03-services/catalog/configmap-env.yaml \
-              -f k8s/03-services/catalog/secret.yaml \
-              -f k8s/03-services/payments/configmap-env.yaml \
-              -f k8s/03-services/payments/secret.yaml \
-              -f k8s/02-observability/grafana/secret.yaml \
-              -f k8s/02-observability/grafana/deployment.yaml
-
-kubectl rollout restart deployment -n fcg
-```
-
-**O `apply` do meio não é opcional.** O `init-secrets.sh` só **escreve arquivos** — não há
-nenhuma chamada a `kubectl` dentro dele. Sem o `apply`, o `rollout restart` recria os pods
-montando o ConfigMap **antigo** do cluster, com o endereço do broker da sessão passada. Não sai
-erro em lugar nenhum: os serviços ficam `1/1 Running` acumulando falha de conexão em laço, e o
-sintoma só aparece na quinta prova da sessão verde, longe da causa.
-
-O endereço do broker vive no ConfigMap e a credencial no Secret. A credencial é estável entre
-sessões — o segredo é permanente —, mas aplicar os dois custa o mesmo e não depende dessa
-estabilidade continuar valendo.
-
-Ao fim, confirme que o endereço chegou ao cluster:
-
-```bash
-kubectl get configmap catalog-env -n fcg -o jsonpath='{.data.RabbitMq__Host}'
-```
-
-Tem de ser o endereço do broker **desta** sessão.
-
-### 7. Aplicar o root da função (só perfil Saga)
-
-Este passo roda **no repositório da função** — outro worktree, com Terraform próprio:
-
-```bash
-terraform -chdir=<repo-da-função>/terraform apply
-```
-
-Nenhum `-var` é necessário: o arquivo de variáveis de lá já traz o nome do broker e o
-identificador do segredo, ambos estáveis entre sessões.
-
-O plano tem de sair **`8 to add, 0 to change, 0 to destroy`** — a função, a tabela de
-idempotência, o papel e a política, o grupo de log, o empacotamento e os dois mapeamentos de
-origem. Leva 4–6 minutos: os mapeamentos nascem em paralelo e dominam o tempo — medidos em
-4m14s e 4m46s, num apply de 5m42s —; o resto sai em segundos.
-
-Por último, e **depois da topologia existir**. São duas dependências, não uma:
-
-- o broker tem de estar de pé, porque o root de lá o resolve **por nome**, e a consulta falha
-  enquanto ele não existir;
-- **a fila antes do mapeamento de origem** — mapeamento que aponta para fila inexistente não
-  dá erro, dá silêncio, e o diagnóstico sai com o broker cobrando.
+A publicação da imagem é pulada na re-execução (a tag já existe no ECR); só o deploy trabalha.
+Nunca resolva a divergência aplicando imagem à mão: o pipeline é o único caminho de entrega
+para produção.
 
 ---
 
 ## Sessão verde
 
-Cinco provas, nesta ordem. Cada uma isola uma camada.
+Seis provas pela borda, de fora, como um cliente qualquer — e a suíte de testes. Só depois delas
+a sessão está aberta.
+
+### Variáveis
 
 ```bash
-API=https://<api>.execute-api.<região>.amazonaws.com
+API=$(terraform -chdir=terraform/platform output -raw api_issuer)
+SENHA=$(grep '^ADMINSEED_PASSWORD=' .env.eks | cut -d= -f2- | tr -d '\r\n')   # nunca impressa
+
+# devolve só o token; a senha entra pelo stdin do curl, não pela linha de comando
+login() {
+  printf '{"email":"%s","senha":"%s"}' "$1" "$2" \
+    | curl -s -X POST "$API/api/auth/login" -H 'Content-Type: application/json' -d @- \
+    | jq -r .accessToken
+}
+# lê um campo do corpo do token, sem validar assinatura (quem valida é a borda)
+campo() {
+  printf '%s' "$1" | python -c 'import sys,json,base64; p=sys.stdin.read().split(".")[1]; p+="="*(-len(p)%4); print(json.loads(base64.urlsafe_b64decode(p))[sys.argv[1]])' "$2"
+}
 ```
 
-**1. Rota protegida sem token → 401 da borda.**
+### Borda ou serviço: os cabeçalhos
+
+Um `401` do gateway e um `401` do serviço têm o mesmo código e causas opostas. O que separa os
+dois são os cabeçalhos:
+
+| Cabeçalhos | Quem respondeu |
+|---|---|
+| `apigw-requestid` presente, **sem** `server` | o gateway — a requisição morreu na borda, o serviço nunca acordou |
+| `server: Kestrel` | o serviço — a requisição atravessou gateway → VPC Link → NLB → Traefik → Ingress e foi recusada (ou atendida) por ele |
+
+As provas abaixo usam essa distinção: não basta o código certo, ele tem de vir da camada certa.
+
+### As seis provas
+
+**1. Rota protegida sem token morre no gateway.**
 
 ```bash
-curl -i "$API/api/jogos"
+curl -si "$API/api/jogos" | grep -iE '^(HTTP|server|apigw-requestid)'
+# HTTP/1.1 401 ... com apigw-requestid, sem server
 ```
 
-A resposta vem **sem** o cabeçalho `Server` e **com** `apigw-requestid`: foi o gateway que
-barrou, o backend nunca acordou.
-
-**2. Login → 200 com token.**
+**2. Login do administrador, e o token certo.**
 
 ```bash
-curl -s -X POST "$API/api/auth/login" \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"admin@fcg.com","senha":"<senha-do-administrador>"}'
+TOKEN_ADMIN=$(login admin@fcg.com "$SENHA")
+campo "$TOKEN_ADMIN" iss   # igual ao $API, byte a byte
+campo "$TOKEN_ADMIN" aud   # fcg
 ```
 
-O usuário administrativo é semeado na migration. A senha é a `ADMINSEED_PASSWORD` do **arquivo
-de perfil da instância** — não a do laptop, que carrega placeholders. Rodar o login de dentro
-da instância evita que ela apareça no histórico do terminal local:
+O emissor do token tem de ser exatamente o endereço público: é contra ele que o authorizer
+valida. Anote a hora — é o **primeiro login pela borda**, o marco do tempo de abertura.
+
+**3. O discovery responde pelo endereço público.**
 
 ```bash
-# na instância, em ~/fcg-ops
-SENHA=$(grep '^ADMINSEED_PASSWORD=' .env.ec2 | cut -d= -f2-)
+curl -s "$API/.well-known/openid-configuration" | jq -r .issuer   # igual ao $API
 ```
 
-O `iss` do token decodificado tem de ser **igual** à URL do gateway. Se der 401 na próxima
-prova com este token válido, ver [401 com token válido](#401-com-token-válido-em-rota-protegida).
-
-**3. Discovery pelo gateway → 200.**
+**4. Rota protegida com token chega ao serviço.**
 
 ```bash
-curl -s "$API/.well-known/openid-configuration"
+curl -si "$API/api/jogos" -H "Authorization: Bearer $TOKEN_ADMIN" | grep -iE '^(HTTP|server)'
+# HTTP/1.1 200, server: Kestrel
 ```
 
-O `issuer` do documento é o mesmo do token. É o discovery circular vivo — o mesmo caminho que
-o authorizer percorre em runtime.
-
-**4. Rota protegida com token → 200.**
+**5. A saga pela borda.** Um usuário novo, uma compra, a biblioteca:
 
 ```bash
-curl -i -H "Authorization: Bearer $TOKEN" "$API/api/jogos"
+EMAIL="sessao-$(date +%s)@fcg.test"; SENHA_U='SenhaE2E@2026'   # conta descartável
+printf '{"nome":"Usuario Sessao","email":"%s","senha":"%s"}' "$EMAIL" "$SENHA_U" \
+  | curl -s -o /dev/null -w '%{http_code}\n' -X POST "$API/api/usuarios" \
+      -H 'Content-Type: application/json' -d @-                         # 201
+TOKEN=$(login "$EMAIL" "$SENHA_U")
+USUARIO=$(campo "$TOKEN" sub)
+JOGO=$(curl -s "$API/api/jogos?pagina=1&tamanhoPagina=100" -H "Authorization: Bearer $TOKEN" \
+  | jq -r '[.[] | select(.ativo and .preco <= 5000)] | min_by(.preco) | .id')
+PEDIDO=$(printf '{"jogoId":"%s"}' "$JOGO" \
+  | curl -s -X POST "$API/api/pedidos" -H "Authorization: Bearer $TOKEN" \
+      -H 'Content-Type: application/json' -d @- | jq -r .id)            # 202, Pendente
+for i in $(seq 1 15); do
+  st=$(curl -s "$API/api/pedidos/$PEDIDO" -H "Authorization: Bearer $TOKEN" | jq -r .status)
+  [ "$st" != Pendente ] && break; sleep 2
+done; echo "$st"                                                         # Aprovado
+curl -s "$API/api/biblioteca/$USUARIO" -H "Authorization: Bearer $TOKEN" | jq length   # 1
+aws dynamodb query --table-name fcg-biblioteca \
+  --key-condition-expression 'PK = :pk' \
+  --expression-attribute-values "{\":pk\":{\"S\":\"USER#$USUARIO\"}}" --query Count   # 1
 ```
 
-Agora **com** `Server: Kestrel`. É a prova de que o caminho privado funciona de ponta a
-ponta: gateway → VPC Link → descoberta → porta de nó → serviço.
+A compra atravessa o broker duas vezes — catalog publica o pedido, payments decide e publica o
+resultado, catalog credita a biblioteca —, e o item na tabela do DynamoDB foi escrito pela
+identidade de workload do catalog: o nó não tem permissão nenhuma na tabela. Nas sessões
+medidas, o pedido saiu `Aprovado` em 1 a 2,2 segundos.
 
-**5. Mensageria (só perfil Saga).** Um pedido credita a biblioteca e a função registra a
-notificação:
+**6. Caminho inexistente morre no gateway.**
 
 ```bash
-curl -i -X POST "$API/api/pedidos" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"jogoId":"..."}'
+curl -si "$API/inexistente" | grep -iE '^(HTTP|server)'   # 404, sem server
 ```
 
-A prova de consumo são **três coisas juntas**: `consumers=1` na fila, `message_stats` com
-`publish` e `deliver_get`, e a existência de stream de log da função. Não é o campo de
-resultado do mapeamento — ver [o mapeamento não consome](#o-mapeamento-não-consome).
-
-A saga interna se lê pelas filas, e ela é independente da função:
+### A suíte da borda
 
 ```bash
-# na instância, em ~/fcg-ops
-U=$(grep '^RABBITMQ_USER=' .env.ec2 | cut -d= -f2-)
-P=$(grep '^RABBITMQ_PASSWORD=' .env.ec2 | cut -d= -f2-)
-H=$(grep '^RABBITMQ_HOST=' .env.ec2 | cut -d= -f2-)
-curl -sS -u "$U:$P" "https://$H/api/queues"
+cd tests && FCG_API_BASE_URL="$API" FCG_ADMIN_PASSWORD="$SENHA" \
+  FCG_RSA_PRIVATE_KEY_PATH="$(cygpath -w "$PWD/../identity-rsa-private.pem")" \
+  .venv/Scripts/pytest borda -v 2>&1 | tee "$REG/pytest-borda.txt"; cd ..
 ```
 
-As filas de serviço (`order-placed.fcg-payments`, `payment-processed.fcg-catalog` e
-`payment-processed.fcg-catalog-projections`) saem com `consumers=1` e `messages=0` — publicado e
-consumido. As duas da função ficam com `consumers=0` enquanto o passo 7 não tiver rodado, e a
-mensagem **acumula** ali: é o retrato de topologia correta sem consumidor, não de falha.
+Esperado: **34 passed**, incluindo os 4 da busca (marcador `busca`) e os de token forjado — a
+chave de assinatura do `eks` é a mesma `identity-rsa-private.pem` da cópia. Teste que falhar
+tem de ser classificado antes de qualquer outra coisa: defeito de plataforma, ou premissa do
+teste que a plataforma mudou. O [README da suíte](../tests/README.md) explica cada um.
 
-> **Read model e cache não têm prova própria nesta lista.** As rotas do catálogo os exercitam
-> por baixo, mas nenhuma das cinco os isola. Ao procurar um caminho, note que `/api/biblioteca`
-> só existe como `/api/biblioteca/{proxy+}` — o caminho sem sufixo devolve 404 **do gateway**
-> (sem `Server`), e um sufixo inexistente devolve 404 **do backend** (com `Server: Kestrel`).
-> Os dois códigos são iguais e as causas são opostas.
+Com as seis provas e a suíte verdes, a sessão está aberta.
 
 ---
 
-## Acesso ao Grafana
+## Busca na sessão
 
-Túnel SSH em duas etapas. Nada é exposto: o Service continua interno, não há rota no gateway
-para ele, e o grupo de segurança não ganha abertura nenhuma além do SSH que já existia.
-
-```bash
-ssh -f -L 3000:localhost:3000 ec2-user@<endereço-fixo> \
-  'kubectl port-forward -n fcg svc/grafana 3000:3000'
-```
-
-O `localhost:3000` do `-L` resolve **na instância**, não no laptop — quem escuta lá é o
-encaminhamento. São três portas 3000 em três máquinas.
-
-**O `-f` não devolve o terminal aqui.** Ele manda o SSH para segundo plano antes de executar o
-comando remoto, mas o `kubectl port-forward` não termina — a sessão fica presa até ser
-interrompida. A forma que devolve o prompt é separar as duas etapas:
+A busca do catálogo é uma projeção num índice próprio, e não a fonte da verdade. Por isso ela
+pode estar quebrada com o serviço saudável: o catalog sobe, o rollout passa, a listagem
+responde — e só `GET /api/jogos/search` devolve `503`. O que diz o estado dela é o log do boot
+do catalog.
 
 ```bash
-# na instância, em segundo plano
-ssh ec2-user@<endereço-fixo> 'nohup kubectl port-forward -n fcg svc/grafana 3000:3000 >/dev/null 2>&1 &'
-
-# no laptop, só o encaminhamento
-ssh -f -N -L 3000:localhost:3000 ec2-user@<endereço-fixo>
+kubectl logs deploy/catalog-api -n fcg | grep -E 'Busca desligada|Cluster de busca|índice de busca'
 ```
 
-Abra `http://localhost:3000`.
+| Linha | O que significa |
+|---|---|
+| `Cluster de busca disponível; preparando o índice.` | o catalog alcançou o domínio, com assinatura e identidade aceitas |
+| `Reconstrução do índice de busca concluída — N indexados, M removidos.` | o índice foi preenchido a partir do banco no boot. Numa sessão nova, `N` é o número de jogos do seed (medido: `22 indexados, 0 removidos`), cerca de um segundo depois da linha anterior |
+| `Cluster de busca indisponível; nova tentativa a cada …` | o domínio ainda não respondia; o catalog tenta de novo sozinho. Aceitável **antes** da linha de disponível |
+| `Reconstrução automática do índice de busca falhou; o remédio é a reconstrução manual.` | o índice não foi preenchido; o serviço segue de pé. Remédio: [reindexar](#operações-sob-demanda) |
+| `Busca desligada: OpenSearch:Endpoint ausente.` | o `catalog-env` chegou sem o endereço do domínio. Na sessão não devia acontecer — a barreira do `apply-all.sh` existe para isso; ver [Diagnóstico](#busca-responde-503) |
 
-O túnel morre com a parada da instância. **Mas a porta local pode ficar presa** se o processo
-do laptop for morto sem fechar o socket — o encaminhamento seguinte falha em `connect` com a
-3000 aparentemente livre. `Get-NetTCPConnection -LocalPort 3000 -State Listen` mostra o socket
-órfão; usar outra porta local (`-L 3001:localhost:3000`) contorna sem esperar.
+A reconstrução no boot só preenche índice **vazio** (com índice já preenchido, a linha é
+`Índice de busca já preenchido; reconstrução pulada.`). Numa sessão nova o índice sempre nasce
+vazio, junto com o domínio.
 
-A credencial administrativa vem do Secret gerado pelo `init-secrets.sh` a partir do arquivo de
-perfil — **desde que o Secret e o Deployment tenham sido aplicados**, o que o passo 6 da
-abertura faz. Sem isso o cluster continua rodando a versão anterior do Deployment, com a
-credencial embutida no manifesto, e nenhum sintoma denuncia a diferença: o dashboard abre
-normalmente com o valor antigo.
-
-Para conferir de que origem vem, olhe a estrutura e não a senha:
+A saúde, de dentro do cluster — o health agregado do catalog tem um check `opensearch`:
 
 ```bash
-kubectl get deployment grafana -n fcg -o jsonpath='{.spec.template.spec.containers[0].envFrom}'
+kubectl run saude-catalog -n fcg --rm -i --restart=Never --image=curlimages/curl:8.11.1 \
+  -- curl -s http://catalog-api/health
+# ... {"name":"opensearch","status":"Healthy"} ...
 ```
 
-Tem de sair `[{"secretRef":{"name":"grafana-secret"}}]`, e a lista `env` do mesmo container tem
-de estar vazia. Comparar senhas não discrimina: se o arquivo de perfil trouxer `admin`, os dois
-caminhos aceitam a mesma coisa.
+Pela borda, a prova é a mesma da suíte: `search?q=witcer` (com erro de digitação de propósito)
+traz *The Witcher 3: Wild Hunt* em primeiro, com `relevancia`; um termo que casa com vários
+jogos traz todos, em relevância não crescente. Uma edição no catálogo aparece na busca em
+segundos — medido: criação visível em 3,1 s, troca de título em 1,2 s, desativação fora do
+resultado em 0,5 s.
 
-> **Postura:** o Service é interno e o acesso depende de já se ter SSH na instância. Se ele um
-> dia ganhar exposição, a credencial passa a valer sozinha como defesa, e a força dela no
-> arquivo de perfil vira o que separa o dashboard da internet.
+---
+
+## Operações sob demanda
+
+Dois Jobs do catalog que não fazem parte da subida, de propósito: rodam quando alguém pede.
+
+```bash
+FCG_PERFIL=eks bash scripts/rodar-job-catalog.sh reprojetar
+FCG_PERFIL=eks bash scripts/rodar-job-catalog.sh reindexar
+```
+
+O `FCG_PERFIL=eks` não é opcional: o padrão do script é `k3d`, e a guarda de contexto dele
+recusa o perfil que não casa com o cluster atual — um Job de um ambiente rodado no outro
+escreveria no índice ou no read model errado.
+
+| Job | O que faz | Quando usar |
+|---|---|---|
+| `reprojetar` | relê a biblioteca no banco relacional e a reescreve na tabela do read model, pela mesma porta de escrita do caminho de evento; termina com `Reconstrução da biblioteca concluída — N projetados, M pulados.` | o read model ficou para trás do relacional |
+| `reindexar` | relê o catálogo do banco relacional e reescreve o índice de busca: indexa os ativos, remove os desativados | o domínio de busca caiu ou ficou inalcançável no meio da sessão e voltou; a reconstrução automática do boot falhou |
+
+Os dois **nunca apagam** nada do banco relacional, que é a fonte da verdade — só reescrevem a
+projeção a partir dele. Medido numa sessão: `reindexar` em ~5 s, com
+`Reconstrução do índice de busca concluída — 22 indexados, 1 removidos.` — exatamente os 22
+jogos ativos e o 1 desativado que a listagem mostrava naquele momento.
+
+O script:
+
+1. lê a imagem que o `catalog-api` **está servindo agora** — o Job roda o mesmo código que
+   atende as requisições, e não o HEAD da `main`, que pode estar à frente do implantado;
+2. confere que ela tem a forma do perfil (no `eks`, ECR com tag de commit);
+3. apaga o Job anterior — Job concluído não roda de novo —, aplica, e espera `Complete` ou
+   `Failed` (teto de 300 s);
+4. imprime as últimas linhas do log e a imagem usada. Sai `0` só com `Complete`.
+
+**O log de um Job que falhou.** Quando o Job estoura as tentativas, o controlador **apaga o
+pod**, e com ele o log: ler depois do `Failed` não acha nada. Por isso o script guarda o log a
+cada sondagem e, se o pod já sumiu, mostra o último que leu, avisando
+(`o pod do Job já não existe; último log lido durante a espera`).
+
+**Não há operação para apagar o índice** a partir do cluster: a policy do domínio de busca só
+aceita a identidade do catalog. A reconstrução cobre o caso real — índice desatualizado —
+sem precisar disso.
+
+---
+
+## Pipeline durante a sessão
+
+O pipeline mora em cada repositório de serviço (`fcg-identity`, `fcg-catalog`, `fcg-payments`),
+não aqui. Ele roda com ou sem sessão aberta; o que muda é até onde a entrega chega.
+
+**Em push na `main`:** testes → **Imagem** (build, scan não bloqueante, publicação no GHCR e no
+ECR com a tag do commit) → **Deploy** (guardas, Job de migration recriado com a imagem nova,
+rollout). Em pull request, só os testes e a análise estática.
+
+| Situação | O que acontece |
+|---|---|
+| sessão aberta, stack de pé | imagem publicada, migration, rollout. Produção passa a rodar o commit |
+| sessão fechada | imagem publicada; deploy **adiado**, run **verde**, com a nota `cluster desligado — imagem publicada, deploy adiado`. A próxima abertura sobe esse commit |
+| sessão abrindo ou fechando | deploy adiado, run verde. Se o push entrou durante a abertura, ver [Convergência com a main](#convergência-com-a-main) |
+
+### Como ler um run
+
+- **Dois jobs de entrega, dois significados.** O job de imagem verde quer dizer que o commit
+  está publicado; o de deploy verde quer dizer *que ele terminou* — implantado **ou adiado**. As
+  anotações do run dizem qual dos dois: o adiamento deixa um aviso ou uma nota com o motivo.
+- **A análise estática (Sonar) vermelha não é falha de entrega.** Ela não está no caminho da
+  imagem nem do deploy.
+- **Step com `continue-on-error` aparece como sucesso** mesmo quando falhou — é o caso do scan
+  de vulnerabilidades, não bloqueante de propósito. O que ele achou está nas anotações e no
+  resumo do job, não na cor.
+- O resumo do job de deploy registra o fim da migration, a criação do ReplicaSet novo e a
+  evidência de acesso do pipeline (`kubectl auth can-i` sobre Secrets, ConfigMaps e Jobs).
+
+### Regras
+
+- **Nunca `[skip ci]`.** Um commit que não passa pelo pipeline não chega a produção, e o
+  próximo que passar leva os dois juntos sem que nenhum tenha sido entregue sozinho. A `main` é
+  produção: todo commit nela passa pelo mesmo caminho.
+- **Rollback é `git revert` + push.** O pipeline entrega o revert como qualquer commit: testes,
+  imagem nova, migration, rollout. Não há atalho de "voltar a imagem" pelo cluster — se o rollout
+  de um deploy não converge, o próprio job desfaz para a revisão anterior e falha, e a correção
+  vem por commit novo.
+- **Deploys do mesmo repositório são em série, e o último vence.** O job de deploy de cada
+  repositório roda um por vez; um run que chega atrasado e já não é o HEAD da `main` é
+  descartado pela guarda de HEAD. Dois pushes seguidos terminam com o segundo implantado, nunca
+  o primeiro por cima dele.
+
+Medido em sessão: sete deploys pelo pipeline, cada um com o Job de migration `Complete` antes
+do ReplicaSet novo, e o push levando de 197 a 266 s até o pod novo `Ready`.
+
+---
+
+## Medir disponibilidade
+
+"Rollout sem downtime" só vale medido, e medido **de dentro de um pod**. Do laptop, o laço mede
+a rede de casa, o antivírus e o provedor: uma falha ali não diz nada sobre a plataforma, e um
+verde ali também não. De dentro do cluster, chamando o endereço público, a requisição faz o
+mesmo caminho de um cliente — gateway, VPC Link, NLB, Traefik, serviço — sem o ruído do laptop.
+
+**O token vai num volume, e é renovado antes de cada medição.** O access token do identity vale
+60 minutos. Passado por variável de ambiente, ele fica congelado no pod e o laço passa a medir
+`401` de token vencido; montado de um Secret, ele muda quando o Secret muda. O kubelet propaga a
+troca para o volume periodicamente, não na hora — renove com folga antes de começar.
+
+**1. O token e o endereço num Secret** (o mesmo comando cria e renova):
+
+```bash
+TOKEN=$(login "$EMAIL" "$SENHA_U")    # usuário descartável da sessão verde
+kubectl create secret generic loop-token -n fcg \
+  --from-literal=TOKEN="$TOKEN" --from-literal=API="$API" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**2. O pod medidor:**
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: medidor
+  namespace: fcg
+spec:
+  restartPolicy: Never
+  containers:
+    - name: laco
+      image: curlimages/curl:8.11.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          while true; do
+            api=$(cat /laco/API); token=$(cat /laco/TOKEN)
+            rm -f /tmp/cab
+            codigo=$(curl -s -m 5 -o /dev/null -D /tmp/cab -w '%{http_code}' \
+              -H "Authorization: Bearer $token" "$api/api/jogos")
+            agora=$(date -u +%H:%M:%S)
+            if [ "$codigo" = 200 ]; then
+              echo "$agora 200"
+            else
+              echo "$agora $codigo $(grep -iE '^(www-authenticate|server|apigw-requestid):' /tmp/cab 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
+            fi
+            sleep 0.2
+          done
+      volumeMounts:
+        - name: laco
+          mountPath: /laco
+          readOnly: true
+  volumes:
+    - name: laco
+      secret:
+        secretName: loop-token
+EOF
+```
+
+Cada iteração é um `curl` novo — **uma conexão por requisição**, para que o balanceador e o
+Traefik possam mandar cada uma para um pod diferente, como fariam com clientes distintos. O
+`-m 5` transforma travamento em linha registrada. Em todo não-`200` o laço grava os
+cabeçalhos que dizem quem respondeu e por quê.
+
+**3. A medição:** uns 30 s de laço → a mudança (um `kubectl rollout restart`, ou o push que o
+pipeline vai implantar) → `kubectl rollout status` → mais uns 60 s de laço.
+
+**4. A contagem:**
+
+```bash
+kubectl logs medidor -n fcg > "$REG/medicao.txt"
+awk '{print $2}' "$REG/medicao.txt" | sort | uniq -c   # esperado: só 200
+grep -v ' 200$' "$REG/medicao.txt"                     # o que não foi 200, com os cabeçalhos
+```
+
+**5. A limpeza:**
+
+```bash
+kubectl delete pod medidor -n fcg
+kubectl delete secret loop-token -n fcg
+```
+
+Medido assim: rollout do catalog com 420 requisições e 0 não-200; rollout do Traefik com 778 e
+0; sete deploys pelo pipeline com 7.192 requisições e 0 não-200.
+
+---
+
+## Grafana
+
+O Grafana não tem rota no gateway, de propósito: o Service é interno e nada da observabilidade é
+exposto. O acesso é por encaminhamento de porta, direto do laptop:
+
+```bash
+kubectl port-forward -n fcg svc/grafana 3000:3000
+```
+
+Abra `http://localhost:3000`. O usuário é `admin`; a senha é a `GRAFANA_ADMIN_PASSWORD` do
+`.env.eks` desta sessão, gerada pelo `gerar-env.sh` e materializada no Secret `grafana-secret`
+pelo `init-secrets.sh`. As fontes de dados (Loki, Tempo, Prometheus) e o dashboard **FCG —
+visão geral** vêm provisionados.
+
+O encaminhamento é um processo: ele morre com `Ctrl+C`, ou com o cluster. **Encaminhamento
+esquecido é fonte recorrente de diagnóstico errado** — ele continua escutando na porta depois
+que o cluster mudou. Se a 3000 estiver presa por um processo que já morreu, outra porta local
+contorna sem esperar (`3001:3000`).
+
+O que o dashboard mede é o **servidor**: o que o gateway barrou — `401` do authorizer, `404` de
+rota não declarada — nunca chega ao serviço e não aparece em painel nenhum. Ver [O painel de 4xx
+não desenha](#o-painel-de-4xx-não-desenha).
 
 ---
 
 ## Fechamento
 
-**Nesta ordem, e a ordem importa.**
+**Nesta ordem, e a ordem importa.** Até o inventário sair zero a sessão não está fechada.
 
-**1. Root da função** (só perfil Saga), no repositório da função:
-
-```bash
-terraform -chdir=<repo-da-função>/terraform destroy
-```
-
-Primeiro, sempre: o mapeamento de origem aponta para o broker, e destruir o broker antes deixa
-mapeamento órfão. A função e o mapeamento estão entre os **proibidos entre sessões** — se
-sobrarem, o inventário do passo 4 sai `exit 1`.
-
-Sai `8 destroyed` em cerca de um minuto — casando com o `8 to add` da abertura. A destruição é
-muito mais rápida que a criação, e os mapeamentos que levaram minutos para nascer somem em
-segundos.
-
-**2. Root de sessão** (só perfil Saga):
+**1. Esvaziar o cluster.**
 
 ```bash
-terraform -chdir=terraform/session destroy
+date -u +%Y-%m-%dT%H:%M:%SZ   # anote: início do fechamento
+bash scripts/fechar-cluster-eks.sh 2>&1 | tee "$REG/fechar.txt"
 ```
 
-Leva **~20 minutos** e sai `13 destroyed`, casando com o `13 to add` da abertura — medido em
-20m44s. O tempo é dominado pelo **grupo de segurança do broker**, que só some depois que as
-interfaces de rede anexadas a ele são liberadas: uma medição atribuiu **19m41s a esse único
-recurso**, com todo o resto saindo em segundos.
+O cluster criou coisas por conta própria que **não estão no estado do Terraform**: os volumes
+EBS dos PVCs, os alvos registrados no target group da borda, os grupos de segurança do
+controlador de balanceador. Se o destroy vier antes, elas sobram na conta — cobrando, ou
+prendendo a rede e fazendo o destroy falhar. O script desfaz na ordem que deixa a conta limpa:
 
-**Não interrompa.** Um destroy parado por vinte minutos numa linha só parece pendurado e não
-está — e interromper ali é justamente como se deixa **grupo de segurança órfão**, que é o
-recurso que o gate abaixo não conta.
+1. o namespace `fcg` — com ele os PVCs, e o driver apaga os volumes;
+2. a espera até não sobrar volume do namespace;
+3. a ligação do Traefik com o target group, e a espera até o target group ficar sem alvo — um
+   alvo esquecido apontaria para um IP que o próximo cluster pode reusar;
+4. o Traefik;
+5. o controlador de balanceador, **por último** entre os componentes: é ele quem desfaz o que
+   criou, e sem ele de pé nada mais limpa;
+6. a conferência de que não sobrou grupo de segurança do controlador;
+7. a remoção, do kubeconfig, do contexto, do cluster e do usuário do `fcg-eks` — o cluster vai
+   deixar de existir, e um contexto apontando para ele faria o próximo `kubectl` esperar por um
+   endereço morto.
 
-**3. Parar a instância — nunca terminar:**
+Ele só roda com o contexto atual do `fcg-eks`: o primeiro passo apaga o namespace `fcg`, que no
+k3d também existe. Termina dizendo que o contexto foi removido e como voltar ao k3d
+(`kubectl config use-context k3d-fcg`).
+
+**2. O plano de destruição, salvo e revisado.**
 
 ```bash
-aws ec2 stop-instances --instance-ids <id-instância>
-aws ec2 wait instance-stopped --instance-ids <id-instância>
+terraform -chdir=terraform/session plan -destroy -input=false -no-color \
+  -out=../plans/session-destroy.tfplan > "$REG/plano-destroy.txt" 2>&1
+grep '^Plan:' "$REG/plano-destroy.txt"
+# Plan: 0 to add, 0 to change, 53 to destroy.
 ```
 
-O volume guarda o cluster, as imagens e as variáveis. Terminar joga tudo isso fora e a
-próxima sessão vira um levantamento do zero.
+O número é o mesmo da abertura. Se a sessão foi aberta com o fallback
+`-var cd_politica_edicao=true`, o plano de destruição leva o mesmo `-var`, e o número é 56. Plano
+diferente disso: **não aplique** — registre o plano e investigue. É o único caso em que a sessão
+pode ficar aberta, e quem a deixou aberta tem de saber disso.
 
-**Espere o `stopped`.** Instância em `stopping` faz a consulta do gate retornar vazio, e um
-fechamento apressado colhe um falso `exit 2` — a instância aparece como ausente do
-inventário quando só está a caminho.
+**3. Aplicar o plano salvo.**
 
-**4. Inventário, que sai zero:**
-
-```powershell
-$env:MSYS2_ARG_CONV_EXCL = '*'
-& "C:\Program Files\Git\bin\bash.exe" scripts/inventario-aws.sh
+```bash
+terraform -chdir=terraform/session apply -no-color ../plans/session-destroy.tfplan \
+  > "$REG/destroy.txt" 2>&1
+grep '^Apply complete' "$REG/destroy.txt"
+# Apply complete! Resources: 0 added, 0 changed, 53 destroyed.
 ```
 
-`exit 0` fecha a sessão. `exit 1` significa que sobrou recurso cobrado por hora — leia as
-linhas marcadas e destrua antes de sair.
+Aplicar um plano de destruição salvo imprime `Apply complete!`, e não `Destroy complete!` — é o
+texto certo, não sinal de que nada foi destruído; o que prova é o `53 destroyed`. Leva uns 15
+minutos, e o domínio de busca é o mais lento (~14–15 min). **Não interrompa**: um destroy
+parado numa linha por minutos parece pendurado e não está, e interromper ali é como se deixam
+recursos órfãos.
 
-> O gate **não conta grupos de segurança**. Eles são destruídos junto com o broker; se um dia
-> um destroy parcial deixar um para trás, o inventário sai zero com recurso sobrando.
+**4. Apagar o `.env.eks`.**
+
+```bash
+rm -f .env.eks
+```
+
+As senhas dele eram dos bancos desta sessão, que acabaram de morrer. Guardá-lo só convida a
+reusá-lo na próxima — e o `gerar-env.sh` recusaria por isso.
+
+**5. O inventário sai zero.**
+
+```bash
+bash scripts/inventario-aws.sh; echo $?   # 0
+```
+
+`0` fecha a sessão. `1` é recurso cobrado por hora sobrando: leia as linhas `EXCEDENTE` e
+resolva antes de sair. Confira também que `terraform -chdir=terraform/session state list` não
+lista nada.
 
 ---
 
-## Inventário permanente
+## O que fica de pé entre sessões
 
-O que fica de pé entre sessões, e o que cada peça custa parada:
+O `platform/`, inteiro. É o que o inventário confere como `esperado`:
 
-| Peça | Quantidade | Custo/mês |
-|---|---|---|
-| Instância do cluster, parada, com volume | 1 | ~US$1,30 |
-| Endereço IP fixo, associado | 1 | ~US$3,60 |
-| API HTTP, authorizer JWT, VPC Link | 1 cada | — |
-| Namespace, serviços e registros de descoberta | 1 / 2 / 2 | ~US$0,30 |
-| Tabela do read model | 1 | ~US$0 |
-| Segredo da credencial do broker | 1 | ~US$0,40 |
-| Grupo de log de acesso do gateway | 1 | — |
-| **Total parado** | | **~US$5,60** |
+| Peça | Quantidade |
+|---|---|
+| API HTTP, com o authorizer JWT e as rotas | 1 |
+| integração privada da borda e VPC Link | 1 cada |
+| NLB interno e o target group do Traefik (sem alvos) | 1 cada |
+| grupo de log de acesso do gateway | 1 |
+| segredo da credencial do broker | 1 |
+| repositórios de imagem, tags imutáveis | 3 |
+| provedor de identidade do GitHub e roles do pipeline | 1 e 3 |
+| roles de workload | 3 |
 
-O segredo é **permanente**: é ele que mantém a credencial estável entre sessões. Seu
-identificador só muda se o próprio segredo for recriado.
+Mais a rede onde tudo isso mora (VPC, sub-redes, grupos de segurança), que não cobra por hora.
 
-Proibidos entre sessões — achar qualquer um destes é `exit 1`: broker gerenciado, mapeamento
-de origem de eventos, função serverless e tabela de idempotência da função.
+E o que **não pode** sobrar — achar qualquer um é `exit 1`: cluster, nós, volumes de PVC, broker,
+domínio de busca, tabela do read model, endpoints de VPC da sessão, grupos de segurança e
+balanceador criados pelo controlador, alvos registrados no target group.
+
+**Custo parado: não medido de forma conclusiva.** O NLB interno é cobrado por hora mesmo sem
+tráfego, pela tabela de preço; mas a consulta de custo de um dia inteiro com só a plataforma de
+pé mostrou valores bem abaixo disso, e a leitura por tipo de uso, que separaria a dúvida, não foi
+feita. Este documento não afirma número.
+
+O segredo do broker é permanente de propósito: é ele que mantém a credencial estável entre
+sessões, e o broker de cada sessão nasce lendo dele.
 
 ---
 
@@ -600,200 +944,163 @@ de origem de eventos, função serverless e tabela de idempotência da função.
 
 Sintoma → causa → conserto. Cada item aqui custou pelo menos uma sessão para ser medido.
 
-### SSH parou do nada, com a instância de pé
-
-`ssh: connect to host ... port 22: Connection timed out`, sem que nada tenha mudado no
-repositório.
-
-O endereço administrativo autorizado caducou: o provedor trocou o IP de saída. Medido
-acontecendo com um dia de intervalo, mesmo bloco do provedor e último octeto diferente.
-
-Conserto: atualizar o `admin_cidr` e reaplicar o root permanente. O plano sai
-`0 to add, 1 to change, 0 to destroy`. É o passo 1 da abertura justamente para que o
-diagnóstico não aconteça com a instância cobrando.
-
-### O gate acusa `AUSENTE` um recurso que existe
-
-O inventário reporta, por exemplo, `AUSENTE grupo de log de acesso do gateway (0 de 1)`,
-enquanto a consulta direta mostra o recurso presente e íntegro.
-
-O único argumento do script que começa com `/` é reescrito pela conversão de caminho
-POSIX→Windows antes de chegar ao executável, e a chamada morre. Sob o tratamento de erro da
-consulta, isso vira "ausente" silencioso.
-
-Conserto: as **duas** medidas juntas, sempre.
-
-```powershell
-$env:MSYS2_ARG_CONV_EXCL = '*'
-& "C:\Program Files\Git\bin\bash.exe" scripts/inventario-aws.sh
-```
-
-Elas resolvem problemas **diferentes** — o caminho explícito escolhe o interpretador, a
-variável conserta a conversão — e cada uma sozinha já foi medida falhando. Invocar pelo
-caminho explícito sem a variável mantém o processo filho fazendo a conversão; usar a variável
-sem o caminho explícito cai no interpretador errado, que não enxerga o worktree.
-
 ### 401 com token válido em rota protegida
 
-O login devolve 200, o token parece bom, e toda rota protegida devolve 401. Parece erro de
-assinatura; é erro de string.
+O login devolve `200`, o token parece bom, e toda rota protegida devolve `401` sem `server` —
+o gateway recusou. Parece erro de assinatura; é erro de string.
 
-Os dois endereços do gateway diferem por uma **barra final**. O emissor configurado tem de
-receber o valor **sem** barra; colar o valor de invocação produz um emissor com barra,
-divergente do que o authorizer espera.
+O emissor que o identity grava no token (`JWT_ISSUER`) tem de ser **igual byte a byte** ao que
+o authorizer exige: o endereço público, **sem barra final**. Os dois outputs do `platform/`
+diferem justamente por essa barra (`api_issuer` sem, `api_invoke_url` com). O `gerar-env.sh` lê
+o `api_issuer` e recusa emissor terminado em `/`; o caso aparece com `.env.eks` editado à mão.
 
-Conserto: corrigir a variável de emissor no arquivo de perfil, re-materializar a configuração
-e reiniciar os serviços. O endereço público tolera as duas formas, porque o serviço apara a
-barra — só o emissor é estrito.
+Confira com o `campo "$TOKEN" iss` da [sessão verde](#variáveis) contra o `$API`. Conserto,
+sem gerar o arquivo de novo (isso trocaria as senhas dos bancos de pé): corrija `JWT_ISSUER` e
+`JWT_PUBLIC_BASE_URL` no `.env.eks`, e
+
+```bash
+FCG_PERFIL=eks bash scripts/init-secrets.sh
+kubectl apply -f k8s/03-services/identity/configmap-env.yaml \
+              -f k8s/03-services/catalog/configmap-env.yaml \
+              -f k8s/03-services/payments/configmap-env.yaml
+kubectl rollout restart deployment -n fcg
+```
+
+O `apply` do meio não é opcional: o `init-secrets.sh` só escreve arquivos, e sem ele o
+`rollout restart` recria os pods com o ConfigMap antigo do cluster.
 
 ### Em que camada a resposta morreu
 
-Um 401 do gateway e um 401 do serviço têm o mesmo código. O discriminador é o cabeçalho
-`Server`:
+A tabela de [cabeçalhos](#borda-ou-serviço-os-cabeçalhos) da sessão verde é o teste mais barato
+disponível: `server: Kestrel` é o serviço; `apigw-requestid` sem `server` é o gateway. Dois
+casos de gateway que confundem:
 
-| Cabeçalho | Quem respondeu |
-|---|---|
-| `Server` presente | o backend — a requisição atravessou a borda |
-| `Server` ausente, com `apigw-requestid` | a borda barrou — o backend nunca acordou |
+- **`503` com `apigw-requestid` e sem `server` numa rota aberta** (o discovery, por exemplo): a
+  rota existe, mas o NLB não tem alvo saudável. Sem cluster, é o estado normal; com cluster, é
+  o Traefik fora do target group — o `preparar-cluster-eks.sh` termina conferindo os alvos e é
+  idempotente, pode rodar de novo.
+- **`404` sem `server`**: caminho que o gateway não conhece. Antes de suspeitar da integração,
+  **conte as barras** do endereço: `api_invoke_url` mais `/caminho` dá barra dupla, e
+  `//.well-known/...` não casa `/.well-known/...`.
 
-É o teste mais barato disponível. A alternativa é procurar ausência de linha no log do
-backend, que custa uma consulta e uma âncora.
+### Pod do catalog sem credencial AWS
 
-### `broker-env.sh` com `Connect timeout`, e o resto da instância saudável
-
-A instância alcança a internet normalmente, mas a leitura do segredo pendura.
-
-O nome privado do endpoint de interface faz **toda** a VPC resolver aquele serviço para o
-endereço privado do endpoint — inclusive quem lia pela internet e não tinha problema nenhum.
-Se o grupo do endpoint não autorizar a origem, ela passa a ser barrada.
-
-Diagnóstico: consulte pelo resolvedor da VPC, **nunca** por `getent` ou `ping`.
+O catalog sobe, mas falha ao falar com a tabela do read model ou com o domínio de busca, com
+erro de credencial. A credencial da identidade de workload é **injetada na criação do pod**: um
+pod criado antes da associação de identidade existir fica sem ela até ser recriado. A ordem da
+abertura impede isso; uma reaplicação fora de ordem, não.
 
 ```bash
-dig +short A <serviço>.<região>.amazonaws.com @10.0.0.2
+kubectl exec deploy/catalog-api -n fcg -- printenv | grep -oE '^AWS_[A-Z_]+' | sort -u
 ```
 
-`getent` responde do cache local e pode devolver endereço IPv6 público, enquanto o caminho
-real é IPv4 — foi isso que fez o sintoma parecer intermitente. A chave de comparação é sempre
-**o nome**: o endereço privado do endpoint muda a cada sessão.
+Só os nomes, nunca os valores. Tem de aparecer `AWS_CONTAINER_CREDENTIALS_FULL_URI`. Sem ele,
+com a associação já listada (`aws eks list-pod-identity-associations --cluster-name fcg-eks`):
 
-### O mapeamento não consome
+```bash
+kubectl rollout restart deploy/catalog-api -n fcg
+```
 
-O campo de último resultado de processamento é **retrato da última tentativa falha**, não
-estado corrente: ele continua acusando erro depois de a função já ter sido invocada com
-sucesso. Ler só esse campo dá "ainda quebrado" com o caminho funcionando.
+### Busca responde 503
 
-A prova de consumo são três coisas juntas: `consumers=1` na fila, `message_stats` com
-`publish` e `deliver_get`, e a existência de stream de log.
+`GET /api/jogos/search` com `503` e `server: Kestrel`: o serviço respondeu, a busca não. As
+linhas do boot do catalog dizem qual das duas causas é:
 
-Ao procurar a invocação no log, **enumere as streams sem limite**. Limitar a consulta a um item
-devolve a stream errada por causa da paginação. A stream é por **ambiente de execução**, não por
-invocação: invocações próximas reaproveitam a mesma (o campo `cold_start` distingue a primeira
-das seguintes), e uma pausa longa o bastante para reciclar o ambiente abre outra.
+| Linha no log do catalog | Causa | Conserto |
+|---|---|---|
+| `Busca desligada: OpenSearch:Endpoint ausente.` | o `catalog-env` chegou sem o endereço do domínio | `bash scripts/busca-env.sh`, `FCG_PERFIL=eks bash scripts/init-secrets.sh`, `kubectl apply -f k8s/03-services/catalog/configmap-env.yaml` e `kubectl rollout restart deploy/catalog-api -n fcg` |
+| `Cluster de busca indisponível; …` sem a linha de disponível depois | o domínio não responde ao catalog — ainda nascendo, ou fora | esperar; o catalog tenta de novo sozinho e preenche o índice quando o domínio volta |
+| `Reconstrução automática do índice de busca falhou; …` | o domínio respondeu, mas o preenchimento não terminou | `FCG_PERFIL=eks bash scripts/rodar-job-catalog.sh reindexar` |
 
-Se o mapeamento realmente não alcançar o broker, a mensagem de erro avança a cada conserto —
-é a única forma de saber que o anterior pegou. Dois fatos que se generalizam: grupo declarado
-como recurso nasce **sem** a saída irrestrita que o console adiciona por padrão, e **tráfego
-entre membros do mesmo grupo não é liberado implicitamente**.
+Sem domínio nenhum — no k3d — o `503` é o comportamento certo, não defeito.
 
-### O painel de 4xx não desenha
+### O kubectl aponta para um cluster que não existe mais
 
-O painel devolve vetor vazio na maior parte do tempo, e os 401 e 404 da borda não aparecem em
-painel nenhum. **Isso é por construção, não defeito.**
+Todo `kubectl` espera e falha por tempo, ou por nome que não resolve. O contexto atual é o de um
+`fcg-eks` já destruído: o fechamento foi interrompido antes do último passo do
+`fechar-cluster-eks.sh`, ou a sessão foi fechada por outro caminho.
 
-O gateway redige o 401 do authorizer e o 404 de rota não declarada **antes** do VPC Link: o
-backend nunca é acordado, então não incrementa métrica de servidor. Numa medição de 60
-requisições, 36 (60%) não apareceram em painel nenhum.
+As guardas de contexto dos scripts barram o estrago — o `apply-all.sh`, o `rodar-job-catalog.sh`
+e o `fechar-cluster-eks.sh` conferem o contexto antes do primeiro comando. Para o k3d:
 
-O painel responde *"meus serviços estão saudáveis?"*, **não** *"o que meus usuários
-receberam?"*. Para a segunda pergunta, a fonte é o grupo de log de acesso do gateway.
+```bash
+kubectl config use-context k3d-fcg
+```
 
-A exceção que confirma a regra: um 429 de throttle **aparece**, porque o throttle é aplicado
-depois do roteamento e o serviço o contabilizou. O discriminador não é "erro de infra vs. de
-aplicação" — é **quem redigiu a resposta**.
+E para limpar o que sobrou do `fcg-eks`, os três nomes são o ARN do cluster:
 
-### `kubectl apply -R` aplica também os templates
-
-Os diretórios de manifesto guardam, lado a lado, o arquivo real (`secret.yaml`) e o template
-versionado com placeholder (`secret.example.yaml`). Um `kubectl apply -R -f k8s/` aplica os
-**dois**, e o que vale é o último a ser aplicado.
-
-Hoje o acaso protege: `secret.example.yaml` ordena antes de `secret.yaml`, então o real vence e
-nada quebra. É proteção frágil — depende de nome de arquivo, não de intenção. Renomear um
-template ou acrescentar um sufixo pode inverter a ordem, e o sintoma seria um Secret com
-placeholder no cluster, sem erro em lugar nenhum.
-
-O `apply-all.sh` **não** tem esse risco: ele filtra explicitamente (`! -name '*.example.yaml'`).
-O risco é do `apply -R` digitado à mão. Aplique pelo script, ou nomeie os arquivos um a um.
+```bash
+ARN=arn:aws:eks:us-east-1:538003079756:cluster/fcg-eks
+kubectl config delete-context "$ARN"; kubectl config delete-cluster "$ARN"; kubectl config delete-user "$ARN"
+```
 
 ### O Job de migration exige a chave RSA, não só o banco
 
 O `identity-migrate` não sobe só com a connection string: ele cobra também
 `Jwt__RsaPrivateKeyPem`. Faltando a chave, o Job falha por motivo que não menciona chave
-nenhuma, e a leitura natural é procurar defeito no banco.
+nenhuma, e a leitura natural é procurar defeito no banco. A chave sai do `init-secrets.sh`, que
+a lê da cópia (ou a gera, se não houver) — o caminho normal já cobre. O caso que morde é
+materializar Secret à mão, pulando o script.
 
-A chave sai do `init-secrets.sh`, que a gera se não encontrar nenhuma — então o caminho normal
-já cobre. O caso que morde é materializar Secret à mão, pulando o script.
+### Senha trocada no meio da sessão
 
-### Senha nova de Postgres não vale em volume que já existe
+Os bancos gravam a senha **na inicialização do volume**, e só nela. Gerar o `.env.eks` de novo
+com a sessão aberta (`gerar-env.sh --substituir`) produz senhas que os bancos de pé não
+conhecem, e os serviços passam a falhar autenticação (`28P01` no Postgres). É por isso que o
+`gerar-env.sh` recusa sobrescrever sem `--substituir`. Com a sessão aberta, edite só a chave
+que precisa mudar.
 
-A senha do Postgres é gravada **na inicialização do volume**, e só nela. Trocar
-`POSTGRES_CATALOG_PASSWORD` no arquivo de perfil e reaplicar não muda a senha de um banco que
-já nasceu: o volume persiste, a variável nova é ignorada, e o serviço passa a falhar
-autenticação com `28P01`.
+### O painel de 4xx não desenha
 
-Num levantamento do zero isso não aparece — o volume é novo. Aparece ao reaplicar sobre um
-cluster que já rodou. Conserto: `ALTER USER` no banco de pé, ou destruir o volume e deixá-lo
-renascer.
+O painel devolve vetor vazio na maior parte do tempo, e os `401` e `404` da borda não aparecem
+em painel nenhum. **Isso é por construção, não defeito.** O gateway responde o `401` do
+authorizer e o `404` de rota não declarada sem acordar o serviço, então nenhuma métrica de
+servidor é incrementada. O painel responde *"meus serviços estão saudáveis?"*, não *"o que meus
+usuários receberam?"*; para a segunda pergunta, a fonte é o grupo de log de acesso do gateway
+(`/aws/apigateway/fcg-api` — lembre do `MSYS2_ARG_CONV_EXCL='*'` no comando).
+
+### `kubectl apply -R` aplica também os templates
+
+Os diretórios de manifesto guardam, lado a lado, o arquivo gerado (`secret.yaml`) e o template
+versionado com placeholder (`secret.example.yaml`). Um `kubectl apply -R -f k8s/` aplica os
+dois, e vale o último aplicado. Hoje o acaso protege — `secret.example.yaml` ordena antes de
+`secret.yaml` —, mas é proteção de nome de arquivo, não de intenção. O `apply-all.sh` filtra os
+templates explicitamente. Aplique pelo script.
 
 ### Comando que passa por não ter feito nada
 
-`terraform apply` no root errado sai `exit 0` com `No changes` e **nada criado**. Já
-aconteceu, e só foi pego por consulta direta ao serviço depois.
-
-Conserto: use `-chdir=<caminho>` sempre. Ele não depende do diretório corrente.
-
-```bash
-terraform -chdir=terraform/session apply
-```
-
-A regra que generaliza: **confira o efeito, nunca o código de saída.** A mesma classe de
-falha já apareceu em busca textual que sai vazia por ausência do arquivo e em contagem sobre
-recurso inexistente.
-
-### Comando na instância se comporta de forma estranha
-
-Nenhum `$` sobrevive à travessia de camadas de citação até o interpretador da instância —
-variável de laço chega vazia, documento JSON chega malformado. O sintoma é um erro que
-aponta para caminho ou requisição inválida, e não para citação.
-
-Conserto: escreva o script num arquivo e mande-o por redireção, **a partir do Git Bash**:
-
-```bash
-ssh ec2-user@<endereço-fixo> 'bash -s' < <arquivo-local>
-```
-
-Não use o encaminhamento do PowerShell por leitura de arquivo: ele acrescenta marca de ordem
-de byte, e o interpretador da instância lê essa marca como parte do primeiro comando — a
-primeira linha do script se perde em silêncio enquanto o resto roda.
+`terraform apply` no diretório errado sai `exit 0` com `No changes` e **nada criado**. Use
+sempre `-chdir=terraform/<root>`. A regra que generaliza: **confira o efeito, nunca o código de
+saída.** A mesma classe de falha aparece no `aws logs` sob a conversão de caminho do Git Bash
+(volta vazio com `exit 0`) e em busca textual sobre arquivo que não existe.
 
 ### Conferir qual imagem um pod está rodando
 
-A consulta por índice `{.items[0]}` **mente durante um rollout**: o primeiro item pode ser o
-pod em terminação, com a imagem velha. Enumere todos, incluindo a fase:
+A consulta por índice `{.items[0]}` **mente durante um rollout**: o primeiro item pode ser o pod
+em terminação, com a imagem velha. Enumere todos, incluindo a fase:
 
 ```bash
 kubectl get pods -n fcg -o custom-columns=NOME:.metadata.name,FASE:.status.phase,IMAGEM:.spec.containers[0].image
 ```
 
-### Verificar alguma coisa de dentro de um pod de serviço
+Para a imagem que o Deployment **pede** (a que o pipeline trocou), leia o Deployment, como na
+[convergência](#convergência-com-a-main).
 
-As imagens dos serviços **não trazem `curl`**, e o cliente HTTP embutido não faz requisição
-com método arbitrário — ele imprime o texto de uso, que se confunde com erro de plataforma.
-O que funciona é falar HTTP cru:
+### Verificar alguma coisa de dentro do cluster
+
+As imagens dos serviços **não trazem `curl`**. Para olhar de dentro, use um pod efêmero com a
+mesma imagem de teste das medições:
+
+```bash
+kubectl run sonda -n fcg --rm -i --restart=Never --image=curlimages/curl:8.11.1 \
+  -- curl -s -i http://catalog-api/health/ready
+```
+
+De dentro de um pod de serviço, o que funciona é HTTP cru:
 
 ```bash
 printf 'GET /caminho HTTP/1.1\r\nHost: destino\r\nConnection: close\r\n\r\n' | nc -w 5 destino 80
 ```
 
-As probes do Deployment não são afetadas: quem as executa é o kubelet, não o container.
+As probes do Deployment não são afetadas por isso: quem as executa é o kubelet, não o
+container.

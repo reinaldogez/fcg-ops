@@ -34,9 +34,15 @@ $env:FCG_ADMIN_PASSWORD = "<senha do administrador do ambiente alvo>"
 .venv\Scripts\pytest borda -v
 ```
 
-Sem argumento, `pytest` roda as duas camadas. Para uma só, nomeie o diretório (`pytest borda`,
-`pytest interno`) ou selecione pelo marcador — `-m saga`, `-m cache`, ou `-m "not saga"` para
-pular o que depende de mensageria.
+Na Fase 4 a camada que roda é a de borda: `pytest borda`, **34 testes**. Sem argumento, `pytest`
+coleta também `interno/`, que é da Fase 3 e se pula sem caminho até o cluster (ver
+[O que a suite cobre](#o-que-a-suite-cobre)). Dentro da borda, selecione pelo marcador:
+
+- `-m saga` — só a compra ponta a ponta, que espera mensageria;
+- `-m busca` — só os 4 testes da busca do catálogo, que existem **apenas onde há índice de
+  busca** (a sessão de nuvem);
+- `-m "not busca"` — os outros 30, para o ambiente local: sem domínio de busca o catálogo sobe
+  saudável e responde `503` na busca, por desenho, e esses testes falhariam sem defeito nenhum.
 
 ### Variáveis
 
@@ -47,13 +53,15 @@ pular o que depende de mensageria.
 | `FCG_ADMIN_EMAIL` | não | endereço do administrador (padrão: `admin@fcg.com`) |
 | `FCG_TIMEOUT_SAGA` | não | segundos de espera pelo desfecho da compra (padrão: `30`) |
 | `FCG_RSA_PRIVATE_KEY_PATH` | não | caminho da chave privada do emissor, para os testes que forjam token |
-| `FCG_CLUSTER_SSH` | não | destino de SSH que alcança o cluster (ex.: `ec2-user@<endereço>`), para os testes internos |
+| `FCG_CLUSTER_SSH` | não | só da camada interna, que é da Fase 3: destino de SSH que alcançava o cluster; sem ela, a camada se pula |
 
-> **A chave de assinatura é do ambiente alvo, e não do laptop.** A do disco local serve ao
-> perfil local; o alvo em nuvem usa outra, guardada no cluster. Apontar para a errada faz o
-> teste de controle falhar com essa mensagem — de propósito, porque sem ele os testes de prazo
-> e audiência ficariam verdes sem provar nada. Sem a variável, esses testes se pulam: forjar
-> token é reforço da suite, não o piso dela. A chave nunca é lida de dentro do repositório.
+> **A chave de assinatura é a do emissor do ambiente alvo.** No k3d e na sessão de nuvem ela é
+> a mesma: o `init-secrets.sh` materializa no cluster a chave que está no disco da cópia de quem
+> administra (`identity-rsa-private.pem`, fora do git), nos dois perfis. Apontar para outra chave
+> faz o teste de controle falhar com essa mensagem — de propósito, porque sem ele os testes de
+> prazo e audiência ficariam verdes sem provar nada. Sem a variável, esses testes se pulam:
+> forjar token é reforço da suite, não o piso dela. A chave nunca é lida de dentro do
+> repositório.
 
 > **A senha do administrador varia por ambiente.** Ela pertence ao ambiente alvo, não à máquina
 > de quem executa: usar a de outro ambiente produz uma recusa de autenticação que se parece com
@@ -68,12 +76,16 @@ São duas camadas, e o que as separa é o **canal**, não o alvo: a plataforma �
 borda roda de qualquer máquina; a interna precisa de caminho até o cluster e **se pula** quando
 ele não existe — falta de acesso não é defeito de plataforma.
 
+**Na Fase 4 só a borda roda.** A camada interna chegava ao cluster por SSH, e esse caminho não
+existe no cluster gerenciado; ela não foi portada e fica no repositório como registro do que
+provou na Fase 3 (estado completo na tag `fase-3`).
+
 A camada interna existe porque três mecanismos centrais do desenho — cache, entrega confiável e
 read model — **não têm sintoma externo quando quebram**. Uma biblioteca servida pelo banco
 errado, um evento processado duas vezes e um cache que nunca é lido devolvem, todos, respostas
 idênticas às corretas.
 
-`borda/` — o contrato externo, visto de fora:
+`borda/` — o contrato externo, visto de fora (34 testes, 4 sob o marcador `busca`):
 
 - **`test_autorizacao.py`** — rota protegida sem token e caminho inexistente são barrados
   antes de chegar ao serviço; biblioteca de terceiro e criação de item de catálogo por usuário
@@ -84,9 +96,15 @@ idênticas às corretas.
 - **`test_token.py`** — token corrompido é barrado na borda: assinatura adulterada, prazo
   vencido, audiência de outro sistema e texto malformado.
 - **`test_saga.py`** — a compra ponta a ponta pelos dois desfechos: aprovada entra na
-  biblioteca, recusada não entra; e a compra repetida do mesmo jogo é recusada com 409.
+  biblioteca, recusada não entra; e a compra repetida do mesmo jogo é recusada com 409. Os dois
+  jogos da compra saem só dos **ativos** do catálogo: um desativado continua na listagem e não
+  pode ser comprado, e a recusa viria pelo motivo errado.
+- **`test_busca.py`** — a busca do catálogo: termo com erro de digitação acha o título certo em
+  primeiro; termo que casa com vários jogos traz todos, em relevância não crescente (com um
+  resultado só a ordem não prova nada); sem token, 401 na borda; sem termo, 400 do serviço. Os
+  títulos esperados saem do próprio catálogo, não ficam escritos no teste.
 
-`interno/` — o que só se observa de dentro do cluster, por SSH + `kubectl`:
+`interno/` — da Fase 3, o que só se observava de dentro do cluster, por SSH + `kubectl`:
 
 - **`test_cache.py`** — o ciclo do cache-aside do catálogo: a leitura fria grava a entrada com
   prazo, a seguinte é servida por ela e custa metade do tempo, e a escrita no catálogo invalida
@@ -119,8 +137,8 @@ Dois cuidados que o código mantém de propósito:
 **Latência mede-se pelo canal certo, ou não mede nada.** Pela borda, a leitura quente e a fria
 são indistinguíveis — mediana de 0,076s contra 0,079s em 12 amostras, com rodadas em que a fria
 sai *mais rápida*. Não é o cache que falha: é que o trajeto até o gateway custa ~70ms e a
-economia do cache é de ~2ms, então o ganho afunda no ruído. Medida da instância, pela porta de
-nó, a mesma leitura quente custa **metade** da fria (≈2ms contra ≈4ms), com as faixas sem
+economia do cache é de ~2ms, então o ganho afunda no ruído. Medida na Fase 3 de dentro da
+instância, pela porta de nó, a mesma leitura quente custa **metade** da fria (≈2ms contra ≈4ms), com as faixas sem
 sobreposição. É por isso que a asserção de tempo vive na camada interna, e não na de borda.
 
 ## Qualidade

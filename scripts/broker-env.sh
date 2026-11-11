@@ -128,4 +128,6 @@ echo "  RABBITMQ_HOST=$BROKER_HOST"
 echo "  RABBITMQ_USER=$BROKER_USER"
 echo "  RABBITMQ_PASSWORD=(escrita no arquivo; não exibida)"
 echo "lembre-se de conferir RABBITMQ_PORT=5671 e RABBITMQ_USE_SSL=true para a nuvem."
-echo "próximo passo: FCG_PERFIL=$FCG_PERFIL bash scripts/topologia.sh"
+# na abertura da sessão o broker vem antes da busca, e os dois antes do init-secrets.sh,
+# que materializa o .env.<perfil> já completo no cluster.
+echo "próximo passo: FCG_PERFIL=$FCG_PERFIL bash scripts/busca-env.sh"

@@ -76,6 +76,7 @@ class Jogo(NamedTuple):
     id: str
     titulo: str
     preco: float
+    desenvolvedora: str | None = None
 
 
 @pytest.fixture(scope="session")
@@ -222,14 +223,33 @@ def cliente_proprio(config: Config, usuario: Usuario) -> Iterator[ClienteApi]:
 
 @pytest.fixture(scope="session")
 def catalogo(config: Config, token_admin: str) -> list[Jogo]:
-    """Catalogo semeado, lido uma vez por sessao."""
+    """Jogos ativos do catalogo semeado, lidos uma vez por sessao.
+
+    So os ativos: um jogo desativado continua na listagem, mas nao pode ser
+    comprado, e a saga escolhe o mais barato ou o mais caro olhando apenas o
+    preco. Com um desativado na ponta, o pedido seria recusado por outro motivo
+    e o teste acusaria a regra de aprovacao no lugar do dado.
+    """
     cliente = ClienteApi(config.base_url, token=token_admin)
     try:
         resposta = cliente.get("/api/jogos", params={"pagina": 1, "tamanhoPagina": 100})
         assert resposta.status_code == 200, f"nao consegui listar o catalogo.\n{descreve(resposta)}"
+        itens = resposta.json()
+        sem_ativo = [item.get("titulo", item.get("id")) for item in itens if "ativo" not in item]
+        assert not sem_ativo, (
+            f"a listagem do catalogo nao traz o campo 'ativo' em {len(sem_ativo)} item(ns) "
+            f"(ex.: {sem_ativo[:3]}). sem ele nao da para separar o jogo compravel do "
+            f"desativado, e a suite nao supoe.\n{descreve(resposta)}"
+        )
         return [
-            Jogo(id=item["id"], titulo=item["titulo"], preco=float(item["preco"]))
-            for item in resposta.json()
+            Jogo(
+                id=item["id"],
+                titulo=item["titulo"],
+                preco=float(item["preco"]),
+                desenvolvedora=item.get("desenvolvedora"),
+            )
+            for item in itens
+            if item["ativo"] is True
         ]
     finally:
         cliente.fecha()
